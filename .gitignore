@@ -30,7 +30,7 @@ frontend/.env.local
 frontend/.vercel/
 .vercel/
 deploy-render-service.json
-private/
+# private/ — temporarily tracked for cross-PC sync; re-gitignore when done
 *.private.json
 presets.private.json
 review_bins.private.json
