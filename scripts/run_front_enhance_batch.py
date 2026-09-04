@@ -123,6 +123,14 @@ async def _one(
 async def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit", type=int, default=0, help="Max inputs (0 = all)")
+    ap.add_argument(
+        "--from",
+        type=int,
+        default=1,
+        dest="from_idx",
+        metavar="N",
+        help="Start at 1-based input index (resume partial batch)",
+    )
     args = ap.parse_args()
 
     from backend import db
@@ -151,6 +159,8 @@ async def main() -> int:
 
     results: list[dict] = []
     for i, item in enumerate(items, 1):
+        if i < args.from_idx:
+            continue
         results.append(
             await _one(
                 idx=i,
