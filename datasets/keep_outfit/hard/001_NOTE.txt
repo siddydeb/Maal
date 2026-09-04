@@ -1,0 +1,2 @@
+﻿Demoted from gold (2026-09-02): volume only mild (vol~0.06), not solid keeper.
+Use as hard/eval pair — do not treat as core gold until a stronger target exists.

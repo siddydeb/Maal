@@ -1,0 +1,15 @@
+# remaining_retry gate (2026-09-04)
+
+## Gold → gold/019–023
+- 1, 2, 3, 4, 7
+
+## Work on (drift / undress on strong)
+- 6, 8 → fix batch tmp_test/18000_fix_6_8/
+
+## Hard / skip
+- 5 occluded chest drift → hard/008
+- 9, 10 weak → hard/009–010
+- 11, 15 bad (reject)
+
+## Next
+Ass enhance after 6/8 settled

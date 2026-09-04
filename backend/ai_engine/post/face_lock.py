@@ -66,9 +66,10 @@ def bust_inpaint_mask_png(
         grow += 1
     mask = mask.filter(ImageFilter.MaxFilter(size=grow))
     mask = _clip_to_bust_bounds(mask, orig.size, face)
-    mask = _ensure_edit_coverage(mask, orig.size, face, lo=0.12, hi=0.20)
+    mask = _ensure_edit_coverage(mask, orig.size, face, lo=0.16, hi=0.28)
     soft = max(3, int(min(orig.size) * 0.008))
     mask = mask.filter(ImageFilter.GaussianBlur(radius=soft))
+    mask = _ensure_edit_coverage(mask, orig.size, face, lo=0.16, hi=0.28)
     rgb = Image.merge("RGB", (mask, mask, mask))
     buf = BytesIO()
     rgb.save(buf, format="PNG")
@@ -163,10 +164,10 @@ def chest_keep_mask(
     mid = min(max(fx + fw / 2.0, w * 0.38), w * 0.62)
     chin = min(max(fy + fh * 1.02, h * 0.30), h * 0.48)
     y1 = chin + h * 0.01
-    y2 = min(h * 0.78, chin + h * 0.48)
-    half = min(fw * 1.45, w * 0.38)
-    x1 = max(w * 0.22, mid - half)
-    x2 = min(w * 0.78, mid + half)
+    y2 = min(h * 0.84, chin + h * 0.56)
+    half = min(fw * 1.85, w * 0.46)
+    x1 = max(w * 0.12, mid - half)
+    x2 = min(w * 0.88, mid + half)
     mask = Image.new("L", (w, h), 0)
     draw = ImageDraw.Draw(mask)
     cy = (y1 + y2) / 2.0
@@ -193,15 +194,15 @@ def _clip_to_bust_bounds(
     arr = np.array(mask, dtype=np.uint8, copy=True) if np is not None else None
     if arr is None:
         px = mask.load()
-        x_lo, x_hi = int(w * 0.20), int(w * 0.80)
-        y_lo, y_hi = int(chin), int(h * 0.78)
+        x_lo, x_hi = int(w * 0.12), int(w * 0.88)
+        y_lo, y_hi = int(chin), int(h * 0.84)
         for yy in range(h):
             for xx in range(w):
                 if xx < x_lo or xx > x_hi or yy < y_lo or yy > y_hi:
                     px[xx, yy] = 0
         return mask
-    x_lo, x_hi = int(w * 0.20), int(w * 0.80)
-    y_lo, y_hi = int(chin), int(h * 0.78)
+    x_lo, x_hi = int(w * 0.12), int(w * 0.88)
+    y_lo, y_hi = int(chin), int(h * 0.84)
     arr[:, :x_lo] = 0
     arr[:, x_hi:] = 0
     arr[:y_lo, :] = 0
@@ -310,9 +311,9 @@ def _bust_lobes(
     mid = min(max(fx + fw / 2.0, w * 0.35), w * 0.65)
     chin = min(max(fy + fh * 0.98, h * 0.28), h * 0.50)
     cy = min(max(chin + h * 0.14, h * 0.46), h * 0.60)
-    rx = min(w * 0.20, max(w * 0.14, fw * 0.40))
-    ry = min(h * 0.11, max(h * 0.08, fh * 0.24))
-    dx = max(w * 0.105, fw * 0.34)
+    rx = min(w * 0.24, max(w * 0.16, fw * 0.46))
+    ry = min(h * 0.135, max(h * 0.095, fh * 0.28))
+    dx = max(w * 0.115, fw * 0.36)
     return [(mid - dx, cy, rx, ry), (mid + dx, cy, rx, ry)]
 
 
@@ -384,7 +385,9 @@ def _bloat_bust(
     sx = xx.copy()
     sy = yy.copy()
     best = np.full((h, w), 9.0, dtype=np.float32)
-    for cx, cy, rx, ry in _bust_lobes(size, face_box):
+    lobes = _bust_lobes(size, face_box)
+    mid_x = float(0.5 * (lobes[0][0] + lobes[1][0])) if len(lobes) >= 2 else float(w) * 0.5
+    for cx, cy, rx, ry in lobes:
         rx = max(float(rx), 1.0)
         ry = max(float(ry), 1.0)
         nx = (xx - cx) / rx
@@ -395,8 +398,14 @@ def _bloat_bust(
         fall = t * t
         # Widen the inner region slightly; keep vertical pull off the hem.
         fx = 1.0 - strength * fall
-        fy = 1.0 - (strength * 0.38) * fall
-        sx = np.where(closer, cx + (xx - cx) * fx, sx)
+        fy = 1.0 - (strength * 0.52) * fall
+        # Mild center-line gather for deeper cleavage under cloth.
+        toward = 1.0 - (strength * 0.18) * fall
+        sx = np.where(
+            closer,
+            cx + (xx - cx) * fx * toward + (mid_x - cx) * (1.0 - toward) * 0.35,
+            sx,
+        )
         sy = np.where(closer, cy + (yy - cy) * fy, sy)
         best = np.where(closer, r2, best)
     return _sample_bilinear(arr, sx, sy)

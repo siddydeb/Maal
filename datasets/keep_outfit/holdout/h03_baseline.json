@@ -1,0 +1,25 @@
+{
+  "date": "2026-09-02",
+  "start": "tmp_test/keep_outfit/start_1_6a9812a0.png",
+  "holdout": "datasets/keep_outfit/holdout/h03_start.png",
+  "recipe": "enhance_boobs [[ko:a1]] [[d:0.86]] seed 42",
+  "tag": "phase0_holdout_saree",
+  "scores": {
+    "mae": 2.126,
+    "chest_mae": 0.702,
+    "fabric_mae": 0.1,
+    "vol": 0.341,
+    "cool": 0.114,
+    "score": 0.387,
+    "garment_drift": 0.199,
+    "saree_score": 0.508
+  },
+  "visual_gate": {
+    "face": "pass \u2014 identity locked",
+    "clothes": "pass \u2014 saree/blouse match, low drift",
+    "volume": "fail \u2014 little/no clear bust increase vs START",
+    "junk": "pass \u2014 no smear/rectangle",
+    "verdict": "SOFT-FAIL (identity OK, volume weak) \u2014 BASELINE locked; not gold; re-run only when recipe/LoRA changes"
+  },
+  "gate_summary": "soft-fail"
+}

@@ -1,0 +1,1 @@
+from inputs_kontext2 #10 src=secret_photo_22670.jpg; gate=user; recipe=kontext2_opaque

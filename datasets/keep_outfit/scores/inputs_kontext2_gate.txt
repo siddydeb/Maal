@@ -1,0 +1,18 @@
+# Human gate — inputs_kontext2 (2026-09-04)
+
+## Absolute gold (train targets)
+- 1,2,3,4,5,6,10 → gold/008–014
+
+## Good
+- 8 → gold/015
+
+## Same / weak
+- 9 → hard/007
+
+## Reject
+- 7 — nipples + dress changed
+
+## Totals after promote
+- gold pairs: 14 (002–015)
+- hard pairs: 6
+- gold look target: volume_kontext2 #9

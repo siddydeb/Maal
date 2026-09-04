@@ -1,0 +1,3 @@
+Holdout is empty on purpose for now.
+Do NOT copy gold/hard starts here — holdout must be unseen photos.
+Add 5+ new start_*.png (no targets) before judging a LoRA checkpoint.

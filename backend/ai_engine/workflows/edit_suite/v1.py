@@ -27,18 +27,18 @@ def register() -> None:
         post_ultra=["color_match", "face_detailer"],
     )
 
-    # Keep-outfit reshape — never Kontext ReferenceLatent (denoise is ignored there).
-    # Garment mask uses CLIPSeg / local fabric (SAM optional refine when weights present).
+    # Keep-outfit reshape — Flux Kontext ReferenceLatent + figure reshape LoRA.
+    # Face / outside-bust restored in edit_runner post.
     register_edit_workflow(
         id="keep_outfit_reshape",
         task_types=["edit.keep_outfit_reshape"],
         task_kind="keep_outfit",
-        preferred_models=["backbone.flux_dev_fp8"],
-        compatible_models=["backbone.flux_kontext_dev_fp8"],
+        preferred_models=["backbone.flux_kontext_dev_fp8"],
+        compatible_models=["backbone.flux_dev_fp8"],
         minimum_models=["backbone.flux_dev_fp8"],
         optional_models=["identity.pulid_flux", "seg.sam", "seg.sam2", "grounding.dino"],
         perception=["garment"],
-        denoise_override=0.62,
+        denoise_override=0.80,
         fallback_workflow_ref=_IMG2IMG,
         post_balanced=["color_match", "face_detailer"],
         post_quality=["color_match", "face_detailer"],

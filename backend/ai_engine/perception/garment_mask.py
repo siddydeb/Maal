@@ -193,7 +193,7 @@ def keep_outfit_edit_mask_png(
         core = core.filter(ImageFilter.MaxFilter(size=grow))
         core = _clip_to_bust_bounds(core, img.size, face)
         clip_fn = _clip_to_bust_bounds
-        cov_hi = 0.20
+        cov_hi = 0.28
 
     meta: dict[str, Any] = {"face": list(face), "region": region_key}
     if garment is None:
@@ -216,7 +216,9 @@ def keep_outfit_edit_mask_png(
             out_arr = c_arr
             meta["garment_intersect"] = False
         else:
-            factor = np.clip(0.35 + 0.65 * g_norm, 0.0, 1.0)
+            # Keep most of the bust core even outside original fabric so volume
+            # can grow and the same cloth can stretch tighter.
+            factor = np.clip(0.70 + 0.30 * g_norm, 0.0, 1.0)
             out_arr = c_arr * factor
             meta["garment_intersect"] = True
         out = Image.fromarray(np.clip(out_arr, 0, 255).astype(np.uint8), mode="L")
@@ -226,10 +228,11 @@ def keep_outfit_edit_mask_png(
         meta["garment_intersect"] = True
 
     out = clip_fn(out, img.size, face)
-    out = _ensure_edit_coverage(out, img.size, face, lo=0.12, hi=cov_hi, clip=clip_fn)
+    cov_lo = 0.16 if region_key == "bust" else 0.12
+    out = _ensure_edit_coverage(out, img.size, face, lo=cov_lo, hi=cov_hi, clip=clip_fn)
     soft = max(3, int(min(img.size) * 0.008))
     out = out.filter(ImageFilter.GaussianBlur(radius=soft))
-    out = _ensure_edit_coverage(out, img.size, face, lo=0.12, hi=cov_hi, clip=clip_fn)
+    out = _ensure_edit_coverage(out, img.size, face, lo=cov_lo, hi=cov_hi, clip=clip_fn)
     meta["coverage"] = _coverage(out)
 
     rgb = Image.merge("RGB", (out, out, out))
@@ -265,25 +268,14 @@ def soft_restore_outside_edit(
     out = Image.composite(edit, orig, keep)
 
     face = detect_face_box(orig) or _portrait_prior(orig.size)
+    # Light strap/hand restore only — do not paste original chest fabric back
+    # (that undoes tighter cloth + volume).
     straps = garment_restore_mask(orig.size, face)
-    straps = straps.point(lambda p: int(p * 0.85))
+    straps = straps.point(lambda p: int(p * 0.35))
     straps = straps.filter(
         ImageFilter.GaussianBlur(radius=max(2, int(min(orig.size) * 0.005)))
     )
     out = Image.composite(orig, out, straps)
-
-    if garment_mask_png and np is not None:
-        g = Image.open(BytesIO(garment_mask_png)).convert("L")
-        if g.size != orig.size:
-            g = g.resize(orig.size, Image.Resampling.BILINEAR)
-        k = np.array(keep, dtype=np.float32) / 255.0
-        gg = np.array(g, dtype=np.float32) / 255.0
-        restore = np.clip((1.0 - np.maximum(k, gg * 0.5)) * 255.0, 0, 255).astype(
-            np.uint8
-        )
-        rm = Image.fromarray(restore, mode="L").filter(ImageFilter.GaussianBlur(radius=2))
-        out = Image.composite(orig, out, rm)
-
     out = Image.composite(orig, out, _face_mask(orig.size, face))
     return image_to_png_bytes(out)
 

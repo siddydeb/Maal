@@ -56,16 +56,16 @@ class KeepOutfitReshapeTests(unittest.TestCase):
         mask_png = bust_inpaint_mask_png(_portrait_png(), prefer_comfy=False)
         mask = Image.open(BytesIO(mask_png)).convert("L")
         cov = _mask_coverage(mask)
-        self.assertGreaterEqual(cov, 0.12)
-        self.assertLessEqual(cov, 0.22)
+        self.assertGreaterEqual(cov, 0.14)
+        self.assertLessEqual(cov, 0.32)
 
     def test_garment_intersect_local(self) -> None:
         png = _portrait_png()
         mask_png, meta = keep_outfit_edit_mask_png(png, prefer_comfy=False)
         self.assertEqual(meta.get("garment_source"), "local_fabric")
         cov = _mask_coverage(Image.open(BytesIO(mask_png)).convert("L"))
-        self.assertGreaterEqual(cov, 0.12)
-        self.assertLessEqual(cov, 0.22)
+        self.assertGreaterEqual(cov, 0.14)
+        self.assertLessEqual(cov, 0.32)
         local = _local_fabric_mask(Image.open(BytesIO(png)).convert("RGB"))
         self.assertGreater(_mask_coverage(local), 0.05)
 

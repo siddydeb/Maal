@@ -1,0 +1,11 @@
+# remaining_final gate (2026-09-04)
+
+## Gold
+- 12, 13, 14 → gold/016–018
+
+## Reject (paste / no real volume)
+- 1–11, 15, 16
+
+## Follow-up
+Retry rejects with KEEP_OUTFIT_BREAST_STRENGTH=0.95 KEEP_OUTFIT_GUIDANCE=4.2 seed=7
+→ tmp_test/18000_remaining_retry/
