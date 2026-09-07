@@ -1,0 +1,1 @@
+from recipe_lock_v2 #24 src=front_11_6a985f5c; gate=user gold 2026-09-05; recipe=frozen_v2 unlock0.55+cloth_retry

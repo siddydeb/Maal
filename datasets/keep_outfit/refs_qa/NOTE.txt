@@ -1,0 +1,3 @@
+enhance_boobs reference gallery from Mongo.
+QA LOOK ONLY — do NOT use as LoRA training targets.
+Training targets must be same-person keep-outfit outputs (start -> liked edit).

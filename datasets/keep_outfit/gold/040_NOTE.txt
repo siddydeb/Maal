@@ -1,0 +1,1 @@
+KEEP prior gold (do not drop). Was gold/011 before lock_v2 replace. Original note: from inputs_kontext2 #4 src=secret_photo_20927.jpg; gate=user; recipe=kontext2_opaque

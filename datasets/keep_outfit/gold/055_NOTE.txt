@@ -1,0 +1,1 @@
+from ass_gate #01 src=01_6a9dbe46; gate=user all-gold; recipe=ass a1.35_s99_g4.2 unlock0.55 reshape_v1; append-only

@@ -1,0 +1,572 @@
+{
+  "updated_at": "2026-09-02T17:56:36.795376+00:00",
+  "mongo_count": 21,
+  "local_count": 10,
+  "unique_count": 31,
+  "phase0_queue_count": 27,
+  "reserved": {
+    "6a9812a0": "holdout_h03",
+    "6a8630fb": "hard_001",
+    "6a82fc23": "gold_002",
+    "6a8370e7": "hard_003"
+  },
+  "unique": [
+    {
+      "id": "6a9862d65a32f6c234f53576",
+      "short": "6a9862d6",
+      "hash": "e14320f3d3f9b56f",
+      "source": "mongo",
+      "filename": "input_95eeb8b2f8.png",
+      "size": 1045659,
+      "role": null,
+      "path": "datasets/keep_outfit/staging/from_mongo/6a9862d6_e14320f3d3f9b56f.png",
+      "created_at": "2026-09-02 17:54:30.786000",
+      "start_path": "datasets/keep_outfit/staging/starts/6a9862d6_e14320f3d3f9b56f.png",
+      "phase0": true
+    },
+    {
+      "id": "6a9862d25a32f6c234f5356f",
+      "short": "6a9862d2",
+      "hash": "afea40a62095ee87",
+      "source": "mongo",
+      "filename": "input_ef069984e0.png",
+      "size": 656346,
+      "role": null,
+      "path": "datasets/keep_outfit/staging/from_mongo/6a9862d2_afea40a62095ee87.png",
+      "created_at": "2026-09-02 17:54:26.809000",
+      "start_path": "datasets/keep_outfit/staging/starts/6a9862d2_afea40a62095ee87.png",
+      "phase0": true
+    },
+    {
+      "id": "6a9862ce5a32f6c234f5356a",
+      "short": "6a9862ce",
+      "hash": "2629ca01d4a98ae8",
+      "source": "mongo",
+      "filename": "input_7fed43ea91.png",
+      "size": 758118,
+      "role": null,
+      "path": "datasets/keep_outfit/staging/from_mongo/6a9862ce_2629ca01d4a98ae8.png",
+      "created_at": "2026-09-02 17:54:22.700000",
+      "start_path": "datasets/keep_outfit/staging/starts/6a9862ce_2629ca01d4a98ae8.png",
+      "phase0": true
+    },
+    {
+      "id": "6a9862af5a32f6c234f53565",
+      "short": "6a9862af",
+      "hash": "f76436790cc1488e",
+      "source": "mongo",
+      "filename": "input_9901c26553.png",
+      "size": 483763,
+      "role": null,
+      "path": "datasets/keep_outfit/staging/from_mongo/6a9862af_f76436790cc1488e.png",
+      "created_at": "2026-09-02 17:53:51.400000",
+      "start_path": "datasets/keep_outfit/staging/starts/6a9862af_f76436790cc1488e.png",
+      "phase0": true
+    },
+    {
+      "id": "6a9862975a32f6c234f53561",
+      "short": "6a986297",
+      "hash": "1881ad167a021966",
+      "source": "mongo",
+      "filename": "input_50d8fad0b1.png",
+      "size": 899078,
+      "role": null,
+      "path": "datasets/keep_outfit/staging/from_mongo/6a986297_1881ad167a021966.png",
+      "created_at": "2026-09-02 17:53:27.821000",
+      "start_path": "datasets/keep_outfit/staging/starts/6a986297_1881ad167a021966.png",
+      "phase0": true
+    },
+    {
+      "id": "6a98626c5a32f6c234f5355b",
+      "short": "6a98626c",
+      "hash": "2720e2ed378a832a",
+      "source": "mongo",
+      "filename": "input_feabe0a757.png",
+      "size": 943256,
+      "role": null,
+      "path": "datasets/keep_outfit/staging/from_mongo/6a98626c_2720e2ed378a832a.png",
+      "created_at": "2026-09-02 17:52:44.037000",
+      "start_path": "datasets/keep_outfit/staging/starts/6a98626c_2720e2ed378a832a.png",
+      "phase0": true
+    },
+    {
+      "id": "6a98622d5a32f6c234f53555",
+      "short": "6a98622d",
+      "hash": "afb988211fa5f31f",
+      "source": "mongo",
+      "filename": "input_5db6db8f24.png",
+      "size": 516899,
+      "role": null,
+      "path": "datasets/keep_outfit/staging/from_mongo/6a98622d_afb988211fa5f31f.png",
+      "created_at": "2026-09-02 17:51:41.720000",
+      "start_path": "datasets/keep_outfit/staging/starts/6a98622d_afb988211fa5f31f.png",
+      "phase0": true
+    },
+    {
+      "id": "6a985fd15a32f6c234f53550",
+      "short": "6a985fd1",
+      "hash": "eb043c05196475cd",
+      "source": "mongo",
+      "filename": "input_cd4094cb17.png",
+      "size": 1359454,
+      "role": null,
+      "path": "datasets/keep_outfit/staging/from_mongo/6a985fd1_eb043c05196475cd.png",
+      "created_at": "2026-09-02 17:41:37.165000",
+      "start_path": "datasets/keep_outfit/staging/starts/6a985fd1_eb043c05196475cd.png",
+      "phase0": true
+    },
+    {
+      "id": "6a985fb05a32f6c234f53548",
+      "short": "6a985fb0",
+      "hash": "1d05ad86cb36603e",
+      "source": "mongo",
+      "filename": "input_4f9d801550.png",
+      "size": 1091043,
+      "role": null,
+      "path": "datasets/keep_outfit/staging/from_mongo/6a985fb0_1d05ad86cb36603e.png",
+      "created_at": "2026-09-02 17:41:04.995000",
+      "start_path": "datasets/keep_outfit/staging/starts/6a985fb0_1d05ad86cb36603e.png",
+      "phase0": true
+    },
+    {
+      "id": "6a985f6e5a32f6c234f53541",
+      "short": "6a985f6e",
+      "hash": "f01fb5a4d4ea6910",
+      "source": "mongo",
+      "filename": "input_6afb6a57bd.png",
+      "size": 1280040,
+      "role": null,
+      "path": "datasets/keep_outfit/staging/from_mongo/6a985f6e_f01fb5a4d4ea6910.png",
+      "created_at": "2026-09-02 17:39:58.870000",
+      "start_path": "datasets/keep_outfit/staging/starts/6a985f6e_f01fb5a4d4ea6910.png",
+      "phase0": true
+    },
+    {
+      "id": "6a985f5c5a32f6c234f53539",
+      "short": "6a985f5c",
+      "hash": "c53e2a7cf13a94be",
+      "source": "mongo",
+      "filename": "input_08fcdcf742.png",
+      "size": 494141,
+      "role": null,
+      "path": "datasets/keep_outfit/staging/from_mongo/6a985f5c_c53e2a7cf13a94be.png",
+      "created_at": "2026-09-02 17:39:40.964000",
+      "start_path": "datasets/keep_outfit/staging/starts/6a985f5c_c53e2a7cf13a94be.png",
+      "phase0": true
+    },
+    {
+      "id": "6a985f3f5a32f6c234f53535",
+      "short": "6a985f3f",
+      "hash": "0c3fbb8c88d038b4",
+      "source": "mongo",
+      "filename": "input_870fd217b0.png",
+      "size": 686990,
+      "role": null,
+      "path": "datasets/keep_outfit/staging/from_mongo/6a985f3f_0c3fbb8c88d038b4.png",
+      "created_at": "2026-09-02 17:39:11.902000",
+      "start_path": "datasets/keep_outfit/staging/starts/6a985f3f_0c3fbb8c88d038b4.png",
+      "phase0": true
+    },
+    {
+      "id": "6a985f285a32f6c234f53530",
+      "short": "6a985f28",
+      "hash": "f4e7cd9f23146fca",
+      "source": "mongo",
+      "filename": "input_2ee107775b.png",
+      "size": 1351984,
+      "role": null,
+      "path": "datasets/keep_outfit/staging/from_mongo/6a985f28_f4e7cd9f23146fca.png",
+      "created_at": "2026-09-02 17:38:48.663000",
+      "start_path": "datasets/keep_outfit/staging/starts/6a985f28_f4e7cd9f23146fca.png",
+      "phase0": true
+    },
+    {
+      "id": "6a985f155a32f6c234f53528",
+      "short": "6a985f15",
+      "hash": "234ee2c71ca25580",
+      "source": "mongo",
+      "filename": "input_1263a5ee21.png",
+      "size": 558598,
+      "role": null,
+      "path": "datasets/keep_outfit/staging/from_mongo/6a985f15_234ee2c71ca25580.png",
+      "created_at": "2026-09-02 17:38:29.303000",
+      "start_path": "datasets/keep_outfit/staging/starts/6a985f15_234ee2c71ca25580.png",
+      "phase0": true
+    },
+    {
+      "id": "6a985eff5a32f6c234f53523",
+      "short": "6a985eff",
+      "hash": "7e8277525a0ea062",
+      "source": "mongo",
+      "filename": "input_bcea3c56da.png",
+      "size": 761805,
+      "role": null,
+      "path": "datasets/keep_outfit/staging/from_mongo/6a985eff_7e8277525a0ea062.png",
+      "created_at": "2026-09-02 17:38:07.135000",
+      "start_path": "datasets/keep_outfit/staging/starts/6a985eff_7e8277525a0ea062.png",
+      "phase0": true
+    },
+    {
+      "id": "6a985ed65a32f6c234f5351e",
+      "short": "6a985ed6",
+      "hash": "fba78c162559ae59",
+      "source": "mongo",
+      "filename": "input_36351e1197.png",
+      "size": 785187,
+      "role": null,
+      "path": "datasets/keep_outfit/staging/from_mongo/6a985ed6_fba78c162559ae59.png",
+      "created_at": "2026-09-02 17:37:26.496000",
+      "start_path": "datasets/keep_outfit/staging/starts/6a985ed6_fba78c162559ae59.png",
+      "phase0": true
+    },
+    {
+      "id": "6a985abfa804e5c8c60fbb58",
+      "short": "6a985abf",
+      "hash": "8affeb35a029f7d5",
+      "source": "mongo",
+      "filename": "input_5b2f345a8e.png",
+      "size": 669301,
+      "role": null,
+      "path": "datasets/keep_outfit/staging/from_mongo/6a985abf_8affeb35a029f7d5.png",
+      "created_at": "2026-09-02 17:19:59.521000",
+      "start_path": "datasets/keep_outfit/staging/starts/6a985abf_8affeb35a029f7d5.png",
+      "phase0": true
+    },
+    {
+      "id": "6a9812a0a804e5c8c60fbb53",
+      "short": "6a9812a0",
+      "hash": "ed4d9a4f9f787135",
+      "source": "mongo",
+      "filename": "input_5e03670ba9.png",
+      "size": 1265169,
+      "role": "holdout_h03",
+      "path": "datasets/keep_outfit/staging/from_mongo/6a9812a0_ed4d9a4f9f787135.png",
+      "created_at": "2026-09-02 12:12:16.292000",
+      "start_path": "datasets/keep_outfit/staging/starts/6a9812a0_ed4d9a4f9f787135.png",
+      "phase0": false
+    },
+    {
+      "id": "6a8630fbbd8d7c30d36ddd6b",
+      "short": "6a8630fb",
+      "hash": "1ac7da3764b81286",
+      "source": "mongo",
+      "filename": "input_d02e9e35b9.png",
+      "size": 1407738,
+      "role": "hard_001",
+      "path": "datasets/keep_outfit/staging/from_mongo/6a8630fb_1ac7da3764b81286.png",
+      "created_at": "2026-08-19 22:40:59.216000",
+      "start_path": "datasets/keep_outfit/staging/starts/6a8630fb_1ac7da3764b81286.png",
+      "phase0": false
+    },
+    {
+      "id": "6a8370e7a2b6e1d787a52f38",
+      "short": "6a8370e7",
+      "hash": "bd17ccf0be2212ec",
+      "source": "mongo",
+      "filename": "input_e5da467305.png",
+      "size": 299777,
+      "role": "hard_003",
+      "path": "datasets/keep_outfit/staging/from_mongo/6a8370e7_bd17ccf0be2212ec.png",
+      "created_at": "2026-08-17 20:36:55.373000",
+      "start_path": "datasets/keep_outfit/staging/starts/6a8370e7_bd17ccf0be2212ec.png",
+      "phase0": false
+    },
+    {
+      "id": "6a82fc23fa49931262bcef71",
+      "short": "6a82fc23",
+      "hash": "839b8ff36101a6f5",
+      "source": "mongo",
+      "filename": "input_5cb6db99a0.png",
+      "size": 533392,
+      "role": "gold_002",
+      "path": "datasets/keep_outfit/staging/from_mongo/6a82fc23_839b8ff36101a6f5.png",
+      "created_at": "2026-08-17 12:18:43.521000",
+      "start_path": "datasets/keep_outfit/staging/starts/6a82fc23_839b8ff36101a6f5.png",
+      "phase0": false
+    },
+    {
+      "id": "secret_media_22621.jpg",
+      "short": "secret_media_22621",
+      "hash": "3f89e840862a3adb",
+      "source": "local",
+      "filename": "secret_media_22621.jpg",
+      "size": 639391,
+      "role": null,
+      "path": "datasets/keep_outfit/staging/from_local/local_secret_media_22621_3f89e840862a3adb.png",
+      "start_path": "datasets/keep_outfit/staging/starts/secret_media_22621_3f89e840862a3adb.png",
+      "phase0": true
+    },
+    {
+      "id": "secret_photo_20797.jpg",
+      "short": "secret_photo_20797",
+      "hash": "65840c1e663b91d8",
+      "source": "local",
+      "filename": "secret_photo_20797.jpg",
+      "size": 1983233,
+      "role": null,
+      "path": "datasets/keep_outfit/staging/from_local/local_secret_photo_20797_65840c1e663b91d8.png",
+      "start_path": "datasets/keep_outfit/staging/starts/secret_photo_20797_65840c1e663b91d8.png",
+      "phase0": true
+    },
+    {
+      "id": "secret_photo_20833.jpg",
+      "short": "secret_photo_20833",
+      "hash": "5e9a51e2bd5c5258",
+      "source": "local",
+      "filename": "secret_photo_20833.jpg",
+      "size": 525748,
+      "role": null,
+      "path": "datasets/keep_outfit/staging/from_local/local_secret_photo_20833_5e9a51e2bd5c5258.png",
+      "start_path": "datasets/keep_outfit/staging/starts/secret_photo_20833_5e9a51e2bd5c5258.png",
+      "phase0": true
+    },
+    {
+      "id": "secret_photo_20927.jpg",
+      "short": "secret_photo_20927",
+      "hash": "a2fc6c01843d47b9",
+      "source": "local",
+      "filename": "secret_photo_20927.jpg",
+      "size": 949430,
+      "role": null,
+      "path": "datasets/keep_outfit/staging/from_local/local_secret_photo_20927_a2fc6c01843d47b9.png",
+      "start_path": "datasets/keep_outfit/staging/starts/secret_photo_20927_a2fc6c01843d47b9.png",
+      "phase0": true
+    },
+    {
+      "id": "secret_photo_21715.jpg",
+      "short": "secret_photo_21715",
+      "hash": "86472f82c44dad69",
+      "source": "local",
+      "filename": "secret_photo_21715.jpg",
+      "size": 801622,
+      "role": null,
+      "path": "datasets/keep_outfit/staging/from_local/local_secret_photo_21715_86472f82c44dad69.png",
+      "start_path": "datasets/keep_outfit/staging/starts/secret_photo_21715_86472f82c44dad69.png",
+      "phase0": true
+    },
+    {
+      "id": "secret_photo_21831.jpg",
+      "short": "secret_photo_21831",
+      "hash": "29be71438f0a032a",
+      "source": "local",
+      "filename": "secret_photo_21831.jpg",
+      "size": 846341,
+      "role": null,
+      "path": "datasets/keep_outfit/staging/from_local/local_secret_photo_21831_29be71438f0a032a.png",
+      "start_path": "datasets/keep_outfit/staging/starts/secret_photo_21831_29be71438f0a032a.png",
+      "phase0": true
+    },
+    {
+      "id": "secret_photo_21865.jpg",
+      "short": "secret_photo_21865",
+      "hash": "7df1b38134d675cf",
+      "source": "local",
+      "filename": "secret_photo_21865.jpg",
+      "size": 816335,
+      "role": null,
+      "path": "datasets/keep_outfit/staging/from_local/local_secret_photo_21865_7df1b38134d675cf.png",
+      "start_path": "datasets/keep_outfit/staging/starts/secret_photo_21865_7df1b38134d675cf.png",
+      "phase0": true
+    },
+    {
+      "id": "secret_photo_22634.jpg",
+      "short": "secret_photo_22634",
+      "hash": "70b2db8a8b2f79bf",
+      "source": "local",
+      "filename": "secret_photo_22634.jpg",
+      "size": 790593,
+      "role": null,
+      "path": "datasets/keep_outfit/staging/from_local/local_secret_photo_22634_70b2db8a8b2f79bf.png",
+      "start_path": "datasets/keep_outfit/staging/starts/secret_photo_22634_70b2db8a8b2f79bf.png",
+      "phase0": true
+    },
+    {
+      "id": "secret_photo_22658.jpg",
+      "short": "secret_photo_22658",
+      "hash": "8701c9a2aff0ac9a",
+      "source": "local",
+      "filename": "secret_photo_22658.jpg",
+      "size": 969314,
+      "role": null,
+      "path": "datasets/keep_outfit/staging/from_local/local_secret_photo_22658_8701c9a2aff0ac9a.png",
+      "start_path": "datasets/keep_outfit/staging/starts/secret_photo_22658_8701c9a2aff0ac9a.png",
+      "phase0": true
+    },
+    {
+      "id": "secret_photo_22670.jpg",
+      "short": "secret_photo_22670",
+      "hash": "39575486763c6cdd",
+      "source": "local",
+      "filename": "secret_photo_22670.jpg",
+      "size": 2248691,
+      "role": null,
+      "path": "datasets/keep_outfit/staging/from_local/local_secret_photo_22670_39575486763c6cdd.png",
+      "start_path": "datasets/keep_outfit/staging/starts/secret_photo_22670_39575486763c6cdd.png",
+      "phase0": true
+    }
+  ],
+  "phase0_queue": [
+    {
+      "short": "6a9862d6",
+      "hash": "e14320f3d3f9b56f",
+      "start_path": "datasets/keep_outfit/staging/starts/6a9862d6_e14320f3d3f9b56f.png",
+      "source": "mongo"
+    },
+    {
+      "short": "6a9862d2",
+      "hash": "afea40a62095ee87",
+      "start_path": "datasets/keep_outfit/staging/starts/6a9862d2_afea40a62095ee87.png",
+      "source": "mongo"
+    },
+    {
+      "short": "6a9862ce",
+      "hash": "2629ca01d4a98ae8",
+      "start_path": "datasets/keep_outfit/staging/starts/6a9862ce_2629ca01d4a98ae8.png",
+      "source": "mongo"
+    },
+    {
+      "short": "6a9862af",
+      "hash": "f76436790cc1488e",
+      "start_path": "datasets/keep_outfit/staging/starts/6a9862af_f76436790cc1488e.png",
+      "source": "mongo"
+    },
+    {
+      "short": "6a986297",
+      "hash": "1881ad167a021966",
+      "start_path": "datasets/keep_outfit/staging/starts/6a986297_1881ad167a021966.png",
+      "source": "mongo"
+    },
+    {
+      "short": "6a98626c",
+      "hash": "2720e2ed378a832a",
+      "start_path": "datasets/keep_outfit/staging/starts/6a98626c_2720e2ed378a832a.png",
+      "source": "mongo"
+    },
+    {
+      "short": "6a98622d",
+      "hash": "afb988211fa5f31f",
+      "start_path": "datasets/keep_outfit/staging/starts/6a98622d_afb988211fa5f31f.png",
+      "source": "mongo"
+    },
+    {
+      "short": "6a985fd1",
+      "hash": "eb043c05196475cd",
+      "start_path": "datasets/keep_outfit/staging/starts/6a985fd1_eb043c05196475cd.png",
+      "source": "mongo"
+    },
+    {
+      "short": "6a985fb0",
+      "hash": "1d05ad86cb36603e",
+      "start_path": "datasets/keep_outfit/staging/starts/6a985fb0_1d05ad86cb36603e.png",
+      "source": "mongo"
+    },
+    {
+      "short": "6a985f6e",
+      "hash": "f01fb5a4d4ea6910",
+      "start_path": "datasets/keep_outfit/staging/starts/6a985f6e_f01fb5a4d4ea6910.png",
+      "source": "mongo"
+    },
+    {
+      "short": "6a985f5c",
+      "hash": "c53e2a7cf13a94be",
+      "start_path": "datasets/keep_outfit/staging/starts/6a985f5c_c53e2a7cf13a94be.png",
+      "source": "mongo"
+    },
+    {
+      "short": "6a985f3f",
+      "hash": "0c3fbb8c88d038b4",
+      "start_path": "datasets/keep_outfit/staging/starts/6a985f3f_0c3fbb8c88d038b4.png",
+      "source": "mongo"
+    },
+    {
+      "short": "6a985f28",
+      "hash": "f4e7cd9f23146fca",
+      "start_path": "datasets/keep_outfit/staging/starts/6a985f28_f4e7cd9f23146fca.png",
+      "source": "mongo"
+    },
+    {
+      "short": "6a985f15",
+      "hash": "234ee2c71ca25580",
+      "start_path": "datasets/keep_outfit/staging/starts/6a985f15_234ee2c71ca25580.png",
+      "source": "mongo"
+    },
+    {
+      "short": "6a985eff",
+      "hash": "7e8277525a0ea062",
+      "start_path": "datasets/keep_outfit/staging/starts/6a985eff_7e8277525a0ea062.png",
+      "source": "mongo"
+    },
+    {
+      "short": "6a985ed6",
+      "hash": "fba78c162559ae59",
+      "start_path": "datasets/keep_outfit/staging/starts/6a985ed6_fba78c162559ae59.png",
+      "source": "mongo"
+    },
+    {
+      "short": "6a985abf",
+      "hash": "8affeb35a029f7d5",
+      "start_path": "datasets/keep_outfit/staging/starts/6a985abf_8affeb35a029f7d5.png",
+      "source": "mongo"
+    },
+    {
+      "short": "secret_media_22621",
+      "hash": "3f89e840862a3adb",
+      "start_path": "datasets/keep_outfit/staging/starts/secret_media_22621_3f89e840862a3adb.png",
+      "source": "local"
+    },
+    {
+      "short": "secret_photo_20797",
+      "hash": "65840c1e663b91d8",
+      "start_path": "datasets/keep_outfit/staging/starts/secret_photo_20797_65840c1e663b91d8.png",
+      "source": "local"
+    },
+    {
+      "short": "secret_photo_20833",
+      "hash": "5e9a51e2bd5c5258",
+      "start_path": "datasets/keep_outfit/staging/starts/secret_photo_20833_5e9a51e2bd5c5258.png",
+      "source": "local"
+    },
+    {
+      "short": "secret_photo_20927",
+      "hash": "a2fc6c01843d47b9",
+      "start_path": "datasets/keep_outfit/staging/starts/secret_photo_20927_a2fc6c01843d47b9.png",
+      "source": "local"
+    },
+    {
+      "short": "secret_photo_21715",
+      "hash": "86472f82c44dad69",
+      "start_path": "datasets/keep_outfit/staging/starts/secret_photo_21715_86472f82c44dad69.png",
+      "source": "local"
+    },
+    {
+      "short": "secret_photo_21831",
+      "hash": "29be71438f0a032a",
+      "start_path": "datasets/keep_outfit/staging/starts/secret_photo_21831_29be71438f0a032a.png",
+      "source": "local"
+    },
+    {
+      "short": "secret_photo_21865",
+      "hash": "7df1b38134d675cf",
+      "start_path": "datasets/keep_outfit/staging/starts/secret_photo_21865_7df1b38134d675cf.png",
+      "source": "local"
+    },
+    {
+      "short": "secret_photo_22634",
+      "hash": "70b2db8a8b2f79bf",
+      "start_path": "datasets/keep_outfit/staging/starts/secret_photo_22634_70b2db8a8b2f79bf.png",
+      "source": "local"
+    },
+    {
+      "short": "secret_photo_22658",
+      "hash": "8701c9a2aff0ac9a",
+      "start_path": "datasets/keep_outfit/staging/starts/secret_photo_22658_8701c9a2aff0ac9a.png",
+      "source": "local"
+    },
+    {
+      "short": "secret_photo_22670",
+      "hash": "39575486763c6cdd",
+      "start_path": "datasets/keep_outfit/staging/starts/secret_photo_22670_39575486763c6cdd.png",
+      "source": "local"
+    }
+  ]
+}

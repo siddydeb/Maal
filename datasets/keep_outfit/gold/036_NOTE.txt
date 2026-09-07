@@ -1,0 +1,1 @@
+KEEP prior gold (do not drop). Was gold/007 before lock_v2 replace. Original note: from kontext2_all #12; gate=user; recipe=kontext2_face_lock

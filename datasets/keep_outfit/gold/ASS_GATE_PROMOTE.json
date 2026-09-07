@@ -1,0 +1,76 @@
+{
+  "at": "2026-09-06T20:55:03.042914+00:00",
+  "source": "tmp_test/18000_ass_gate",
+  "policy": "never_replace_gold_targets",
+  "knobs": {
+    "strength": 1.35,
+    "seed": 99,
+    "guidance": 4.2,
+    "unlock": 0.55
+  },
+  "promoted": [
+    {
+      "id": "055",
+      "gate_n": 1,
+      "src": "01_6a9dbe46",
+      "hip_mae": 26.051631927490234,
+      "action": "append"
+    },
+    {
+      "id": "056",
+      "gate_n": 2,
+      "src": "02_6a9dbe4b",
+      "hip_mae": 32.31733703613281,
+      "action": "append"
+    },
+    {
+      "id": "057",
+      "gate_n": 3,
+      "src": "03_6a9dbe51",
+      "hip_mae": 23.637691497802734,
+      "action": "append"
+    },
+    {
+      "id": "058",
+      "gate_n": 4,
+      "src": "04_6a9dbe58",
+      "hip_mae": 12.737505912780762,
+      "action": "append"
+    },
+    {
+      "id": "059",
+      "gate_n": 5,
+      "src": "05_6a9dbec1",
+      "hip_mae": 15.215667724609375,
+      "action": "append"
+    },
+    {
+      "id": "060",
+      "gate_n": 6,
+      "src": "06_6a9dbec9",
+      "hip_mae": 15.822762489318848,
+      "action": "append"
+    },
+    {
+      "id": "061",
+      "gate_n": 7,
+      "src": "07_6a9dbecd",
+      "hip_mae": 21.42904281616211,
+      "action": "append"
+    },
+    {
+      "id": "062",
+      "gate_n": 8,
+      "src": "08_6a9dbf42",
+      "hip_mae": 13.093939781188965,
+      "action": "append"
+    },
+    {
+      "id": "063",
+      "gate_n": 9,
+      "src": "09_6a9dbf45",
+      "hip_mae": 20.52849769592285,
+      "action": "append"
+    }
+  ]
+}

@@ -1,1 +1,1 @@
-from kontext2_all #9; gate=user; recipe=kontext2_face_lock
+from recipe_lock_v2 #04 (gold_004); gate=user gold 2026-09-05; recipe=frozen_v2 unlock0.55+cloth_retry; replaced prior target (backup gold_targets_pre_lock_v2_20260905)

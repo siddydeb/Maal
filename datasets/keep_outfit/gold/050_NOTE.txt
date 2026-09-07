@@ -1,0 +1,1 @@
+KEEP prior gold (do not drop). Was gold/021 before lock_v2 replace. Original note: from remaining_retry #3 src=front_06_6a985ed6; gate=user gold

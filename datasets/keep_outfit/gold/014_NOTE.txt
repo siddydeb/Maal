@@ -1,1 +1,1 @@
-from inputs_kontext2 #10 src=secret_photo_22670.jpg; gate=user; recipe=kontext2_opaque
+from recipe_lock_v2 #14 (gold_014); gate=user gold 2026-09-05; recipe=frozen_v2 unlock0.55+cloth_retry; replaced prior target (backup gold_targets_pre_lock_v2_20260905)

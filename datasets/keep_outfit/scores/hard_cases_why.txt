@@ -1,0 +1,21 @@
+# Why 6 / 8 / 11 / 15 fail (known limits)
+
+Product goal: work like golds on **most** inputs. These four are outliers.
+
+| # | What’s special | Failure mode |
+|---|----------------|--------------|
+| **6** | Hair covers ~half the upper chest; dark fitted top; little readable bust under cloth | LoRA invents bare breasts (can’t “see” volume under hair) |
+| **8** | Tiny black crop top + lots of already-visible skin + night flash; face box often locks on hand | Easy undress / translucent paste over straps |
+| **11** | Sheer blue saree over white blouse; small frame; drape/arm occlusion | Near no-op at safe strength; paste/undress if pushed |
+| **15** | Open neckline already shows skin; broken huge face box (~37% of image) | Nipple-poke / skin extension instead of cloth stretch |
+
+Golds work when: opaque garment, clear torso under cloth, clean face box, frontal readable bust.
+
+## Side paths tried (recipe untouched)
+crop+paste, fabric restore, cloth-lock LAB, geo warps, seed@0.62, flux-guide cloth, FORCE_I2I → still not gold.
+
+## Salvage attempt (visible-only)
+- **No new models** — same Kontext + breast LoRA; 6/8 use CV geo only
+- Review: `tmp_test/18000_hard_salvage2/{6,8,11,15}.png`
+- 6/8: mild bulge on visible fabric lobes; hair/rest unchanged
+- 11/15: frozen Flux + softer visible fabric lock

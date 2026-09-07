@@ -1,0 +1,17 @@
+# Hard rework note (2026-09-04)
+
+Product frozen recipe unchanged (0.82 / Kontext / opaque preset).
+
+## Rejected side paths
+- crop+paste (`18000_hard_fix`): undress / sticker
+- fabric restore on Flux (`18000_hard_rework`): restore too weak, undress remains
+- cloth_lock LAB (`18000_hard_rework2`): ghosting, kills volume
+- strong geo + face_lock (`18000_hard_geo*`): bad face boxes pasted over chest
+
+## Gate result (side paths)
+- Seed sweep 0.62: **6/8/15 undress**; **11 no-op**
+- Geo4: clothed but volume too weak
+→ treat **6/8/11/15 as LoRA hard-fails** for v1 unless refs / custom clothed LoRA
+
+## Known detector issue
+#8/#15 face boxes often huge/low — face_lock must be gated by area.

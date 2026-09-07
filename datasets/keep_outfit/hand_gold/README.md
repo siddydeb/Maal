@@ -2,9 +2,11 @@
 
 Starts for keep-outfit gold seeding (`HG##_start.png`).
 
-**Current product step:** swap to Kontext bust LoRA first — see [`../PATH_B_THEN_A.md`](../PATH_B_THEN_A.md).
+## Current product step
+- **Boobs:** frozen v2 — see [`../FROZEN_RECIPE.md`](../FROZEN_RECIPE.md)
+- **Ass:** open — gate with public reshape LoRA only — see [`../ASS_RECIPE.md`](../ASS_RECIPE.md)
 
-GPU semi-gold candidates (yes/no): `tmp_test/keep_outfit/semi_gold/1.png`…  
-Promote yes → `gold/003+` via `python tmp_test/promote_hand_gold.py` (after copying targets to `outbox/` or candidates).
+Drop **rear / ¾-back** starts here for ass recipe gating.  
+Promote keepers → `gold/` next id (**append-only**, never replace targets).
 
-Refs look-only: `refs_look/` (opaque fuller bust, no nipples) — **not** training targets.
+**Skip look refs** for ass (`refs_look/` unused on this track).

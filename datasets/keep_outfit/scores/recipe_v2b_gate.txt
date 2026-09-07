@@ -1,0 +1,11 @@
+# Hard final gate (2026-09-04)
+
+| Case | Status | File |
+|------|--------|------|
+| **6** | **gold** — max bust `b0.95_s7` + yellow strap restore | `18000_hard_final/6.png` |
+| **8** | **gold** | `18000_hard_final/8.png` |
+| **11** | **good** | `18000_hard_final/11.png` |
+| **15** | still hard — Flux = poke; start-fabric warp = mild/soft volume. Gate `15.png` |
+
+Product defaults still gold **v1** until promote.
+v2B (unlock 0.55) helped **6/8/11**; **15** still needs opaque cloth path separate from Flux RGB.

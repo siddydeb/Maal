@@ -1,0 +1,126 @@
+{
+  "at": "2026-09-05T06:11:32.441373+00:00",
+  "policy": "never_replace_gold_targets",
+  "added": [
+    {
+      "id": "031",
+      "src": "backup_pre_lock_v2/002",
+      "action": "append_keep_prior"
+    },
+    {
+      "id": "032",
+      "src": "backup_pre_lock_v2/003",
+      "action": "append_keep_prior"
+    },
+    {
+      "id": "033",
+      "src": "backup_pre_lock_v2/004",
+      "action": "append_keep_prior"
+    },
+    {
+      "id": "034",
+      "src": "backup_pre_lock_v2/005",
+      "action": "append_keep_prior"
+    },
+    {
+      "id": "035",
+      "src": "backup_pre_lock_v2/006",
+      "action": "append_keep_prior"
+    },
+    {
+      "id": "036",
+      "src": "backup_pre_lock_v2/007",
+      "action": "append_keep_prior"
+    },
+    {
+      "id": "037",
+      "src": "backup_pre_lock_v2/008",
+      "action": "append_keep_prior"
+    },
+    {
+      "id": "038",
+      "src": "backup_pre_lock_v2/009",
+      "action": "append_keep_prior"
+    },
+    {
+      "id": "039",
+      "src": "backup_pre_lock_v2/010",
+      "action": "append_keep_prior"
+    },
+    {
+      "id": "040",
+      "src": "backup_pre_lock_v2/011",
+      "action": "append_keep_prior"
+    },
+    {
+      "id": "041",
+      "src": "backup_pre_lock_v2/012",
+      "action": "append_keep_prior"
+    },
+    {
+      "id": "042",
+      "src": "backup_pre_lock_v2/013",
+      "action": "append_keep_prior"
+    },
+    {
+      "id": "043",
+      "src": "backup_pre_lock_v2/014",
+      "action": "append_keep_prior"
+    },
+    {
+      "id": "044",
+      "src": "backup_pre_lock_v2/015",
+      "action": "append_keep_prior"
+    },
+    {
+      "id": "045",
+      "src": "backup_pre_lock_v2/016",
+      "action": "append_keep_prior"
+    },
+    {
+      "id": "046",
+      "src": "backup_pre_lock_v2/017",
+      "action": "append_keep_prior"
+    },
+    {
+      "id": "047",
+      "src": "backup_pre_lock_v2/018",
+      "action": "append_keep_prior"
+    },
+    {
+      "id": "048",
+      "src": "backup_pre_lock_v2/019",
+      "action": "append_keep_prior"
+    },
+    {
+      "id": "049",
+      "src": "backup_pre_lock_v2/020",
+      "action": "append_keep_prior"
+    },
+    {
+      "id": "050",
+      "src": "backup_pre_lock_v2/021",
+      "action": "append_keep_prior"
+    },
+    {
+      "id": "051",
+      "src": "backup_pre_lock_v2/022",
+      "action": "append_keep_prior"
+    },
+    {
+      "id": "052",
+      "src": "backup_pre_lock_v2/023",
+      "action": "append_keep_prior"
+    },
+    {
+      "id": "053",
+      "src": "hard_final#6",
+      "action": "append_keep_prior"
+    },
+    {
+      "id": "054",
+      "src": "hard_final#8",
+      "action": "append_keep_prior"
+    }
+  ]
+}

@@ -1,4 +1,2 @@
-﻿Holdout start: hands-clear saree (start_1_6a9812a0).
-Never train targets from this photo.
-Phase-0 baseline: review_local_phase0_holdout_saree (d0.86 seed 42).
-Re-score only when recipe or keep-outfit LoRA changes.
+Approved look from recipe_lock_v2 (2026-09-05). Holdout — do not train.
+Out saved as h03_target_lock_v2.png (reference only).

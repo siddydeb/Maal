@@ -1,0 +1,1 @@
+KEEP prior gold (do not drop). Was gold/018 before lock_v2 replace. Original note: from remaining_final #14; gate=user gold

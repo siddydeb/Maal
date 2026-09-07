@@ -28,6 +28,10 @@ PNGs are gitignored (`*.png`). README / captions / notes are tracked.
 | `refs_qa/` | Look-only refs — **not** train targets |
 | `staging/rejected_notes/` | Why past evals were not gold |
 
+**Recipes / GPU install:** [`FROZEN_RECIPE.md`](FROZEN_RECIPE.md) · [`ASS_RECIPE.md`](ASS_RECIPE.md) · [`GPU_LORA_SWAP_WET_ACT.md`](GPU_LORA_SWAP_WET_ACT.md)
+
+**Never overwrite gold targets.** If a start gets a new keeper, append the next free `###` id (keep prior pairs).
+
 ## Caption (every gold/hard pair)
 
 ```text

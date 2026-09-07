@@ -1,0 +1,28 @@
+n,gate,notes
+1,reject,face drifted
+2,reject,face sideways; hair drift
+3,reject,same face/hair drift
+4,reject,same
+5,reject,same
+6,reject,same
+7,reject,same
+8,reject,same
+9,reject,same
+10,reject,same
+11,reject,face drift + cloth near hair drift
+12,reject,same
+13,reject,same
+14,reject,same
+15,reject,same
+16,reject,same
+17,reject,face drift
+18,reject,same
+19,reject,whitish cloth mark not in input
+20,reject,same
+21,reject,face drift
+22,reject,same
+23,reject,same
+24,reject,slight nipple/cleavage poke but not good; no real buff
+25,reject,whitish cloth marks
+26,reject,face drift
+27,reject,huge face drift; crop subject tighter next time

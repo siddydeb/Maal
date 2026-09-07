@@ -1,0 +1,15 @@
+# Hard-case side path (2026-09-04)
+
+Product frozen recipe unchanged.
+
+## Cases
+- 6, 8, 11, 15 (bad in remaining_retry / fix_6_8)
+
+## Method
+Bust crop → frozen enhance_boobs → soft paste back + face lock
+`tmp_test/18000_hard_fix/{6,8,11,15}.png`
+
+## Notes
+- Does not modify private defaults / LoRA strength / Kontext path
+- #6 / #15 often low chest delta (hair / flat fabric)
+- #8 / #11 more movement after crop fix

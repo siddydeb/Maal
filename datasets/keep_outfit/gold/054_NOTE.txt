@@ -1,0 +1,1 @@
+KEEP hard_final gold gate. hard_final#8 (b0.95_s7 / strap restore path). Saved without replacing lock_v2 pairs.

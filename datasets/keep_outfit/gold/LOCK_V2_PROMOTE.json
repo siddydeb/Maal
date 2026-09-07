@@ -1,0 +1,161 @@
+{
+  "at": "2026-09-05T05:48:47.988478+00:00",
+  "source": "tmp_test/18000_recipe_lock_v2",
+  "recipe": "frozen_v2_clothed_unlock_055_cloth_retry",
+  "skipped": [
+    "inputs_secret_photo_21865"
+  ],
+  "backup_old_targets": "datasets/keep_outfit/backups/gold_targets_pre_lock_v2_20260905",
+  "promoted": [
+    {
+      "id": "holdout_h03",
+      "src": "holdout_h03",
+      "action": "holdout_ref_only"
+    },
+    {
+      "id": "002",
+      "src": "gold_002",
+      "action": "replace_target"
+    },
+    {
+      "id": "003",
+      "src": "gold_003",
+      "action": "replace_target"
+    },
+    {
+      "id": "004",
+      "src": "gold_004",
+      "action": "replace_target"
+    },
+    {
+      "id": "005",
+      "src": "gold_005",
+      "action": "replace_target"
+    },
+    {
+      "id": "006",
+      "src": "gold_006",
+      "action": "replace_target"
+    },
+    {
+      "id": "007",
+      "src": "gold_007",
+      "action": "replace_target"
+    },
+    {
+      "id": "008",
+      "src": "gold_008",
+      "action": "replace_target"
+    },
+    {
+      "id": "009",
+      "src": "gold_009",
+      "action": "replace_target"
+    },
+    {
+      "id": "010",
+      "src": "gold_010",
+      "action": "replace_target"
+    },
+    {
+      "id": "011",
+      "src": "gold_011",
+      "action": "replace_target"
+    },
+    {
+      "id": "012",
+      "src": "gold_012",
+      "action": "replace_target"
+    },
+    {
+      "id": "013",
+      "src": "gold_013",
+      "action": "replace_target"
+    },
+    {
+      "id": "014",
+      "src": "gold_014",
+      "action": "replace_target"
+    },
+    {
+      "id": "015",
+      "src": "gold_015",
+      "action": "replace_target"
+    },
+    {
+      "id": "016",
+      "src": "gold_016",
+      "action": "replace_target"
+    },
+    {
+      "id": "017",
+      "src": "gold_017",
+      "action": "replace_target"
+    },
+    {
+      "id": "018",
+      "src": "gold_018",
+      "action": "replace_target"
+    },
+    {
+      "id": "019",
+      "src": "gold_019",
+      "action": "replace_target"
+    },
+    {
+      "id": "020",
+      "src": "gold_020",
+      "action": "replace_target"
+    },
+    {
+      "id": "021",
+      "src": "gold_021",
+      "action": "replace_target"
+    },
+    {
+      "id": "022",
+      "src": "gold_022",
+      "action": "replace_target"
+    },
+    {
+      "id": "023",
+      "src": "gold_023",
+      "action": "replace_target"
+    },
+    {
+      "id": "024",
+      "src": "front_11_6a985f5c",
+      "action": "new"
+    },
+    {
+      "id": "025",
+      "src": "front_13_6a985fb0",
+      "action": "new"
+    },
+    {
+      "id": "026",
+      "src": "front_15_6a98622d",
+      "action": "new"
+    },
+    {
+      "id": "027",
+      "src": "front_16_6a98626c",
+      "action": "new"
+    },
+    {
+      "id": "028",
+      "src": "front_17_6a986297",
+      "action": "new"
+    },
+    {
+      "id": "029",
+      "src": "front_18_6a9862af",
+      "action": "new"
+    },
+    {
+      "id": "030",
+      "src": "inputs_secret_photo_22658",
+      "action": "new"
+    }
+  ]
+}
