@@ -5,8 +5,8 @@ Do this on the **GPU / Comfy PC**, then pull this repo on any control PC.
 Boobs/ass stay on `flux_kontext_figure_reshape_v1` — **do not remove**.
 
 ## Why
-Wet (Lurulf) + act POV (old getphat `bl0j0`) failed keep-identity gates.  
-Replace those two slots with stronger public Flux.1 D LoRAs.
+Public 18–37MB Flux “concept” LoRAs (Invisidude / Keltezaa) do not punch hard enough on img2img.  
+Use the large Flux.1 D concept weights: Lurulf wet (292MB) + getphat POV BJ (584MB). Identity still needs face lock — nothing public does both perfectly.
 
 ## 1. Download into Comfy loras folder
 
@@ -18,8 +18,8 @@ E:\Comfy-Desktop\ComfyUI-Shared\models\loras\
 
 | Slot | New on-disk name (required) | Source | Notes |
 |------|----------------------------|--------|--------|
-| **wet_shirt** | `WetshirtForFlux-1.4.safetensors` | [Civitai 724562](https://civitai.com/models/724562) — Flux v1.4 | Invisidude wet T-shirt; best on light tops |
-| **oral_pov** | `flux_pov_bj_v2.safetensors` | [HF Keltezaa/blowjob-pov-flux-lora](https://huggingface.co/Keltezaa/blowjob-pov-flux-lora) | Rename whatever file HF ships → this name |
+| **wet_shirt** | `Wet_ClothesHair_FLUX.safetensors` | [Civitai 1459149](https://civitai.com/models/1459149) Lurulf V1 | **292MB** — only large Flux.1 D wet-clothes LoRA. 36MB Invisidude is white-shirt only. |
+| **oral_pov** | `flux_pov_a_v1.safetensors` | [Civitai 678730](https://civitai.com/models/678730) getphat POV BJ | **584MB** `bl0j0`. 19MB Keltezaa / mrkakapopoloch rank-8 files do not drive img2img. |
 | see_through (keep) | `See_through_clothes_FLUX.safetensors` | [Civitai 1028424](https://civitai.com/models/1028424) v2 | Optional sheer; use lower strength if stacked |
 | male_anatomy (keep) | `flux_anatomy_m_v1.safetensors` | [Civitai 824972](https://civitai.com/models/824972) Dynamic Penis v2 | Keep |
 | hands (keep) | `flux_hands_detail_v1.safetensors` | [Civitai 891074](https://civitai.com/models/891074) | Keep for HJ |
@@ -38,10 +38,10 @@ If HF remote names differ, download manually in browser and **rename** to the ex
 
 ### Rollback (leave on disk, unused)
 
-| Old file | Was used for |
-|----------|----------------|
-| `Wet_ClothesHair_FLUX.safetensors` | wet_shirt (Lurulf) |
-| `flux_pov_a_v1.safetensors` | oral_pov (getphat bl0j0) |
+| Weak file (do not use) | Why |
+|------------------------|-----|
+| `WetshirtForFlux-1.4.safetensors` | 36MB Invisidude — white tops only |
+| `flux_pov_bj_v2.safetensors` | 19MB Keltezaa rank-8 — does not drive the act |
 
 ## 2. Pull code (this repo already wires the new names)
 
@@ -73,8 +73,8 @@ Confirms `/api/health` shows overlay mounted.
 
 | Preset | Expect in job label / LoRA list |
 |--------|----------------------------------|
-| Wet Shirt | `WetshirtForFlux-1.4.safetensors` (+ optional see-through) |
-| BJ | `flux_pov_bj_v2.safetensors` + anatomy + remover |
+| Wet Shirt | `Wet_ClothesHair_FLUX.safetensors` (+ optional see-through) |
+| BJ | `flux_pov_a_v1.safetensors` + anatomy + remover |
 
 Then re-gate:
 

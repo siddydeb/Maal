@@ -6,7 +6,7 @@ Install guide: [`GPU_LORA_SWAP_WET_ACT.md`](GPU_LORA_SWAP_WET_ACT.md)
 
 | Slot | New file |
 |------|----------|
-| wet_shirt | `WetshirtForFlux-1.4.safetensors` (Invisidude) |
+| wet_shirt | `Wet_ClothesHair_FLUX.safetensors` (Lurulf 292MB) |
 
 Boobs + ass remain **frozen**. Acts: see [`ACT_RECIPE.md`](ACT_RECIPE.md).
 

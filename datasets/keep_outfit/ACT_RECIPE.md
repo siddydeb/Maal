@@ -3,7 +3,7 @@
 ## Status
 Boobs + ass **frozen**. Wet **parked** (LoRA swap pending). Acts are **open**.
 
-**LoRA swap:** oral slot → `flux_pov_bj_v2.safetensors` (Keltezaa).  
+**LoRA:** oral slot → `flux_pov_a_v1.safetensors` (getphat `bl0j0`, 584MB). Tiny 19MB Flux LoRAs do not drive the act.  
 Install: [`GPU_LORA_SWAP_WET_ACT.md`](GPU_LORA_SWAP_WET_ACT.md)
 
 First BJ gate (old getphat POV): `tmp_test/18000_act_bj_gate/review/` — identity weak; re-gate after swap + face lock.
@@ -16,7 +16,7 @@ First BJ gate (old getphat POV): `tmp_test/18000_act_bj_gate/review/` — identi
 | Denoise | **≥0.94** | ≥0.94 | ≥0.94 |
 | Remover | clothes_remover | clothes_remover | clothes_remover |
 | Unlock | nsfw_unlock | nsfw_unlock | nsfw_unlock |
-| Act LoRA | `flux_pov_bj_v2` (Keltezaa) | `flux_hands_detail_v1` | breast reshape + anatomy |
+| Act LoRA | `flux_pov_a_v1` (getphat bl0j0) | `flux_hands_detail_v1` | breast reshape + anatomy |
 | Anatomy | `flux_anatomy_m_v1` | same | same |
 | Post | face lock | face lock | face lock |
 
