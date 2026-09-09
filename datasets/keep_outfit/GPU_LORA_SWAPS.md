@@ -1,5 +1,6 @@
 # GPU LoRA swaps
 
-**Canonical install guide:** [`GPU_LORA_SWAP_WET_ACT.md`](GPU_LORA_SWAP_WET_ACT.md)
+Image wet/sheer and image act LoRAs were removed from the product.
 
-Repo already wires the new filenames. On the GPU PC: pull → download/rename → restart Comfy.
+- Clothed reshape: `private/lora_files.py` → `flux_kontext_figure_reshape_v1`
+- Video oral/sex: `private/lora_stack.py` (Wan 2.2 I2V)
