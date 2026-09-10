@@ -205,6 +205,14 @@ export async function updateGeneration(id, { prompt, meta } = {}) {
   return readJson(res);
 }
 
+export async function markGenerationOpened(id) {
+  const res = await fetch(url(`/api/generations/${encodeURIComponent(id)}/opened`), {
+    method: "POST",
+    headers: authHeaders(),
+  });
+  return readJson(res);
+}
+
 export async function deleteGeneration(id) {
   const res = await fetch(url(`/api/generations/${id}`), {
     method: "DELETE",

@@ -35,6 +35,135 @@ def restore_original_face(original_bytes: bytes, edited_bytes: bytes) -> bytes:
     return buf.getvalue()
 
 
+def fluid_face_inpaint_mask_png(image_bytes: bytes) -> bytes:
+    """White PNG mask for face + light neck drip zone — Flux img2img noise_mask.
+
+    Keeps saree/blouse/background out of the sampler so only local fluid is added.
+    """
+    orig = Image.open(BytesIO(image_bytes)).convert("RGB")
+    face = detect_face_box(orig) or _portrait_prior(orig.size)
+    mask = _fluid_face_neck_mask(orig.size, face)
+    soft = max(3, int(min(orig.size) * 0.01))
+    mask = mask.filter(ImageFilter.GaussianBlur(radius=soft))
+    rgb = Image.merge("RGB", (mask, mask, mask))
+    buf = BytesIO()
+    rgb.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def restore_outside_fluid_region(
+    original_bytes: bytes,
+    edited_bytes: bytes,
+    *,
+    edit_mask_png: bytes | None = None,
+) -> bytes:
+    """Paste start photo everywhere outside the face/neck fluid edit zone."""
+    orig = Image.open(BytesIO(original_bytes)).convert("RGB")
+    edit = Image.open(BytesIO(edited_bytes)).convert("RGB")
+    if edit.size != orig.size:
+        edit = edit.resize(orig.size, Image.Resampling.LANCZOS)
+
+    if edit_mask_png:
+        keep = Image.open(BytesIO(edit_mask_png)).convert("L")
+        if keep.size != orig.size:
+            keep = keep.resize(orig.size, Image.Resampling.BILINEAR)
+    else:
+        face = detect_face_box(orig) or _portrait_prior(orig.size)
+        keep = _fluid_face_neck_mask(orig.size, face)
+    soft = max(2, int(min(orig.size) * 0.008))
+    keep = keep.filter(ImageFilter.GaussianBlur(radius=soft))
+    # White in keep = edited fluid region; black = restore original.
+    out = Image.composite(edit, orig, keep)
+    buf = BytesIO()
+    out.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _fluid_face_neck_mask(
+    size: tuple[int, int], box: tuple[int, int, int, int]
+) -> Image.Image:
+    """Tight ellipse: face + tiny neck drip band (avoid raised hands / saree)."""
+    w, h = size
+    x, y, fw, fh = box
+    pad_x = int(fw * 0.12)
+    pad_top = int(fh * 0.28)
+    pad_bot = int(fh * 0.28)  # slight neck only — not blouse body
+    x1 = max(0, x - pad_x)
+    y1 = max(0, y - pad_top)
+    x2 = min(w, x + fw + pad_x)
+    y2 = min(h, y + fh + pad_bot)
+    y2 = min(y2, int(h * 0.42))
+    if y2 <= y1 + 8:
+        y2 = min(h, y1 + max(8, int(h * 0.26)))
+    mask = Image.new("L", (w, h), 0)
+    ImageDraw.Draw(mask).ellipse([x1, y1, x2, y2], fill=255)
+    return mask
+
+
+def composite_fluid_highlights(
+    original_bytes: bytes,
+    edited_bytes: bytes,
+    *,
+    edit_mask_png: bytes | None = None,
+) -> bytes:
+    """Keep start face/clothes pixel-perfect; paste only bright gel from the edit.
+
+    Raised hands, saree, and expression stay from the start photo.
+    """
+    orig = Image.open(BytesIO(original_bytes)).convert("RGB")
+    edit = Image.open(BytesIO(edited_bytes)).convert("RGB")
+    if edit.size != orig.size:
+        edit = edit.resize(orig.size, Image.Resampling.LANCZOS)
+
+    if edit_mask_png:
+        zone = Image.open(BytesIO(edit_mask_png)).convert("L")
+        if zone.size != orig.size:
+            zone = zone.resize(orig.size, Image.Resampling.BILINEAR)
+    else:
+        face = detect_face_box(orig) or _portrait_prior(orig.size)
+        zone = _fluid_face_neck_mask(orig.size, face)
+
+    if np is None:
+        return restore_outside_fluid_region(
+            original_bytes, edited_bytes, edit_mask_png=edit_mask_png
+        )
+
+    o = np.asarray(orig, dtype=np.float32)
+    e = np.asarray(edit, dtype=np.float32)
+    z = np.asarray(zone, dtype=np.float32) / 255.0
+    ol = o[..., 0] * 0.2126 + o[..., 1] * 0.7152 + o[..., 2] * 0.0722
+    el = e[..., 0] * 0.2126 + e[..., 1] * 0.7152 + e[..., 2] * 0.0722
+    # Bright / whitish additions vs start (gel), inside face/neck zone only.
+    bright = (el > ol + 18.0) & (el > 165.0) & (e[..., 0] > e[..., 2] - 8.0)
+    gel = bright & (z > 0.15)
+    if not np.any(gel):
+        # Fallback: mild zone blend so some fluid still appears.
+        soft_z = z * 0.35
+        out = o * (1.0 - soft_z[..., None]) + e * soft_z[..., None]
+        return _png_bytes(Image.fromarray(np.clip(out, 0, 255).astype(np.uint8)))
+
+    gel_u8 = (gel.astype(np.uint8) * 255)
+    soft = (
+        np.asarray(
+            Image.fromarray(gel_u8, mode="L").filter(
+                ImageFilter.GaussianBlur(radius=max(1.5, min(orig.size) * 0.004))
+            ),
+            dtype=np.float32,
+        )
+        / 255.0
+    )
+    soft = np.maximum(soft, gel.astype(np.float32) * 0.85) * np.clip(z, 0.0, 1.0)
+    # Prefer slightly translucent mix so skin shows through thin films.
+    out = o * (1.0 - soft[..., None] * 0.82) + e * (soft[..., None] * 0.82)
+    return _png_bytes(Image.fromarray(np.clip(out, 0, 255).astype(np.uint8)))
+
+
+def _png_bytes(img: Image.Image) -> bytes:
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
 def bust_inpaint_mask_png(
     image_bytes: bytes,
     *,

@@ -135,6 +135,27 @@ async def list_generations(
     return [_serialize(doc) async for doc in cursor]
 
 
+async def mark_generation_opened(
+    gen_id: str, *, owner: Optional[str] = None
+) -> Optional[dict[str, Any]]:
+    """Stamp meta.opened_at without wiping other meta (library 'recently generated' badge)."""
+    try:
+        oid = ObjectId(gen_id)
+    except Exception:
+        return None
+    query: dict[str, Any] = {"_id": oid}
+    if owner:
+        query["owner"] = owner
+    now = datetime.now(timezone.utc)
+    result = await db().generations.update_one(
+        query,
+        {"$set": {"meta.opened_at": now, "updated_at": now}},
+    )
+    if result.matched_count == 0:
+        return None
+    return await get_generation(gen_id, owner=owner)
+
+
 async def set_review_bin(
     gen_id: str, *, owner: str, bin_id: Optional[str]
 ) -> Optional[dict[str, Any]]:
@@ -760,6 +781,13 @@ def _serialize(doc: dict[str, Any]) -> dict[str, Any]:
         out["created_at"] = out["created_at"].isoformat()
     if "updated_at" in out and hasattr(out["updated_at"], "isoformat"):
         out["updated_at"] = out["updated_at"].isoformat()
+    meta = out.get("meta")
+    if isinstance(meta, dict):
+        cleaned = dict(meta)
+        for key, val in list(cleaned.items()):
+            if hasattr(val, "isoformat"):
+                cleaned[key] = val.isoformat()
+        out["meta"] = cleaned
     gid = out.get("id")
     if gid and out.get("gridfs_id"):
         out["media_url"] = f"/api/media/{gid}"

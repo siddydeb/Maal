@@ -868,6 +868,15 @@ async def generation_update(
     return _json(doc)
 
 
+@app.post("/api/generations/{gen_id}/opened")
+async def generation_opened(gen_id: str, owner: str = Depends(require_owner)):
+    """Mark a library item as opened so the 'Recently generated' badge clears."""
+    doc = await db.mark_generation_opened(gen_id, owner=owner)
+    if not doc:
+        raise HTTPException(404, "Not found")
+    return _json(doc)
+
+
 @app.delete("/api/generations/{gen_id}")
 async def generation_delete(gen_id: str, owner: str = Depends(require_owner)):
     ok = await db.delete_generation(gen_id, owner=owner)

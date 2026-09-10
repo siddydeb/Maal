@@ -22,6 +22,7 @@ import {
   waitForApiHealth,
   waitForJob,
   updateGeneration,
+  markGenerationOpened,
   listTestRefs,
   testRefThumbUrl,
   listPresets,
@@ -236,13 +237,16 @@ export default function App() {
   }, []);
 
   const refreshLibrary = useCallback(async (page = libraryPage) => {
+    const listOpts = {
+      limit: LIBRARY_PAGE_SIZE,
+      // Tester PIN library = tagged test runs (batch outputs land here).
+      ...(isTesterOwner() ? { test_run: 1 } : {}),
+    };
     try {
       const skip = Math.max(0, page) * LIBRARY_PAGE_SIZE;
       const data = await listGenerations({
-        limit: LIBRARY_PAGE_SIZE,
+        ...listOpts,
         skip,
-        // Tester PIN library = tagged test runs (batch outputs land here).
-        ...(isTesterOwner() ? { test_run: 1 } : {}),
       });
       const totalPages = Math.max(
         1,
@@ -253,7 +257,7 @@ export default function App() {
         const last = totalPages - 1;
         setLibraryPage(last);
         const again = await listGenerations({
-          limit: LIBRARY_PAGE_SIZE,
+          ...listOpts,
           skip: last * LIBRARY_PAGE_SIZE,
         });
         setLibrary(again.items);
@@ -721,6 +725,27 @@ export default function App() {
   function selectItem(item) {
     // Images and videos both open the lightbox preview
     setLightbox(item);
+    if (item?.id && !item?.meta?.opened_at) {
+      markGenerationOpened(item.id)
+        .then((doc) => {
+          if (!doc?.id) return;
+          setLibrary((prev) =>
+            prev.map((row) =>
+              row.id === doc.id
+                ? { ...row, meta: { ...(row.meta || {}), ...(doc.meta || {}) } }
+                : row
+            )
+          );
+          setLightbox((cur) =>
+            cur?.id === doc.id
+              ? { ...cur, meta: { ...(cur.meta || {}), ...(doc.meta || {}) } }
+              : cur
+          );
+        })
+        .catch(() => {
+          /* badge clear is best-effort */
+        });
+    }
   }
 
   useEffect(() => {
@@ -1634,8 +1659,12 @@ export default function App() {
                 const isVid =
                   item.kind === "vid" ||
                   (item.content_type || "").startsWith("video/");
+                const isRecent = !item?.meta?.opened_at;
                 return (
-                  <li key={item.id} className="gallery-item">
+                  <li
+                    key={item.id}
+                    className={`gallery-item${isRecent ? " is-recent" : ""}`}
+                  >
                     <button
                       type="button"
                       className="gallery-cell"
@@ -1668,6 +1697,9 @@ export default function App() {
                         />
                       )}
                       <span className="gallery-kind">{item.kind}</span>
+                      {isRecent && (
+                        <span className="gallery-recent-tag">Recently generated</span>
+                      )}
                     </button>
                     <div className="gallery-actions">
                       <button
