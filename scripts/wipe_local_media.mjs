@@ -156,13 +156,58 @@ function isWanDownload(file) {
   return /^wan_(img|vid|out)_/i.test(name);
 }
 
+/** Root-level generation leftovers under tmp_test (not tunnel/watchdog/helpers). */
+function isTmpTestRootTrace(file) {
+  const name = path.basename(file).toLowerCase();
+  if (isMedia(file)) return true;
+  if (name.endsWith(".pid")) return true;
+  if (name.endsWith("_run.log") || name.endsWith("_run.txt")) return true;
+  if (name === "job_status.txt") return true;
+  if (name === "manifest.json" || name === "manifest_all.json") return true;
+  return false;
+}
+
 const comfyDir = readEnv("COMFYUI_DIR") || DEFAULT_COMFY;
 
 log(DRY ? "Local media wipe (dry run) — Mongo/Atlas not touched" : "Local media wipe — Mongo/Atlas not touched");
 log("");
 
-wipeTree(path.join(REPO, "tmp_test", "train"), { filter: isTrainDump });
-wipeTree(path.join(REPO, "tmp_test", "review"), { keepRoot: false });
+// All generated media under tmp_test (smoke runs, gates, train dumps, review copies).
+// Keep root-level helpers: tunnel_*.url/.log, watchdog.log, *.py/*.ps1, ops JSON.
+const tmpTest = path.join(REPO, "tmp_test");
+if (!fs.existsSync(tmpTest)) {
+  stats.skipped += 1;
+  log(`skip  ${tmpTest}  (missing)`);
+} else {
+  let entries = [];
+  try {
+    entries = fs.readdirSync(tmpTest, { withFileTypes: true });
+  } catch {
+    entries = [];
+  }
+  let wipedRootTrace = false;
+  for (const e of entries) {
+    const full = path.join(tmpTest, e.name);
+    if (e.isDirectory()) {
+      // train: media + job JSON, then drop empty folder
+      if (e.name === "train") {
+        wipeTree(full, { filter: isTrainDump });
+        rmdirIfEmpty(full);
+        continue;
+      }
+      // review / 18000_* smokes / keep_outfit dumps / preset runs: remove whole tree
+      wipeTree(full, { keepRoot: false });
+      continue;
+    }
+    if (e.isFile() && isTmpTestRootTrace(full)) {
+      if (!wipedRootTrace) {
+        log(`${DRY ? "scan" : "wipe"} ${tmpTest} (root traces)`);
+        wipedRootTrace = true;
+      }
+      unlinkFile(full);
+    }
+  }
+}
 
 for (const folder of ["outputs", "temp", "tmp", "temptest_assets"]) {
   wipeTree(path.join(REPO, folder), { keepRoot: false });

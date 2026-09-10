@@ -106,9 +106,10 @@ def composite_fluid_highlights(
     *,
     edit_mask_png: bytes | None = None,
 ) -> bytes:
-    """Keep start face/clothes pixel-perfect; paste only bright gel from the edit.
+    """Keep start face/clothes pixel-perfect; paste only whitish gel from the edit.
 
-    Raised hands, saree, and expression stay from the start photo.
+    Never blends the edited face structure — identity stays the start photo.
+    If no gel is detected, returns the original unchanged (no soft face morph).
     """
     orig = Image.open(BytesIO(original_bytes)).convert("RGB")
     edit = Image.open(BytesIO(edited_bytes)).convert("RGB")
@@ -124,37 +125,43 @@ def composite_fluid_highlights(
         zone = _fluid_face_neck_mask(orig.size, face)
 
     if np is None:
-        return restore_outside_fluid_region(
-            original_bytes, edited_bytes, edit_mask_png=edit_mask_png
-        )
+        # Without numpy, refuse face morph — keep original.
+        return original_bytes
 
     o = np.asarray(orig, dtype=np.float32)
     e = np.asarray(edit, dtype=np.float32)
     z = np.asarray(zone, dtype=np.float32) / 255.0
     ol = o[..., 0] * 0.2126 + o[..., 1] * 0.7152 + o[..., 2] * 0.0722
     el = e[..., 0] * 0.2126 + e[..., 1] * 0.7152 + e[..., 2] * 0.0722
-    # Bright / whitish additions vs start (gel), inside face/neck zone only.
-    bright = (el > ol + 18.0) & (el > 165.0) & (e[..., 0] > e[..., 2] - 8.0)
-    gel = bright & (z > 0.15)
+    esat = e.max(axis=2) - e.min(axis=2)
+    dy = el - ol
+    # Whitish / cream additions only (not general face rewrite).
+    bright = (dy > 10.0) & (el > 145.0) & (e[..., 0] > 150.0) & (esat < 85.0)
+    chalk = (dy > 14.0) & (el > 185.0) & (esat < 55.0)
+    cream = (
+        (dy > 8.0)
+        & (el > 155.0)
+        & (e[..., 0] > e[..., 2] - 6.0)
+        & (e[..., 0] > e[..., 1] - 10.0)
+        & (esat < 70.0)
+    )
+    gel = (bright | chalk | cream) & (z > 0.12)
     if not np.any(gel):
-        # Fallback: mild zone blend so some fluid still appears.
-        soft_z = z * 0.35
-        out = o * (1.0 - soft_z[..., None]) + e * soft_z[..., None]
-        return _png_bytes(Image.fromarray(np.clip(out, 0, 255).astype(np.uint8)))
+        return original_bytes
 
     gel_u8 = (gel.astype(np.uint8) * 255)
     soft = (
         np.asarray(
             Image.fromarray(gel_u8, mode="L").filter(
-                ImageFilter.GaussianBlur(radius=max(1.5, min(orig.size) * 0.004))
+                ImageFilter.GaussianBlur(radius=max(1.2, min(orig.size) * 0.0035))
             ),
             dtype=np.float32,
         )
         / 255.0
     )
-    soft = np.maximum(soft, gel.astype(np.float32) * 0.85) * np.clip(z, 0.0, 1.0)
-    # Prefer slightly translucent mix so skin shows through thin films.
-    out = o * (1.0 - soft[..., None] * 0.82) + e * (soft[..., None] * 0.82)
+    soft = np.maximum(soft, gel.astype(np.float32) * 0.90) * np.clip(z, 0.0, 1.0)
+    # Opaque beads from edit; skin/features always from start photo.
+    out = o * (1.0 - soft[..., None] * 0.92) + e * (soft[..., None] * 0.92)
     return _png_bytes(Image.fromarray(np.clip(out, 0, 255).astype(np.uint8)))
 
 

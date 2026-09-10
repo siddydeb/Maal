@@ -133,6 +133,13 @@ async def run_post(
         elif key in ("fluid_recolor", "gel_recolor"):
             hints = plan.params_hints or {}
             fluidish = bool(hints.get("fluid_edit"))
+            import os as _os_fr
+
+            # Optional skip (default on): recolor can mute gel after identity lock.
+            skip_env = (_os_fr.environ.get("FLUID_SKIP_RECOLOR") or "1").strip().lower()
+            if skip_env in ("1", "true", "yes"):
+                deferred.append("fluid_recolor_skipped")
+                continue
             if (
                 original_bytes
                 and result.kind == "img"

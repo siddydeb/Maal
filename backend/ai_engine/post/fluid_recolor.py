@@ -198,8 +198,8 @@ def _recolor_numpy(
         thin = np.array(_GEL_THIN, dtype=np.float32)
         thick_c = np.array(_GEL_THICK, dtype=np.float32)
         gel = thin + (thick_c - thin) * thick[..., None]
-        # Thin films still show skin; thicker beads closer to the highlight refs.
-        paint_w = (0.30 + 0.50 * thick) * np.clip(face_m + 0.15, 0.0, 1.0)
+        # Prefer ref-like opaque beads; thin edges still show a little skin.
+        paint_w = (0.62 + 0.35 * thick) * np.clip(face_m + 0.15, 0.0, 1.0)
         stained = o * (1.0 - paint_w[..., None]) + gel * paint_w[..., None]
         # Specular on raised beads only (not a cartoon outline).
         hi = np.clip((ey - 190.0) / 50.0, 0.0, 1.0) * thick * face_paint.astype(np.float32)
