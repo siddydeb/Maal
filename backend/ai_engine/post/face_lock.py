@@ -42,6 +42,7 @@ def fluid_face_inpaint_mask_png(image_bytes: bytes) -> bytes:
     """
     orig = Image.open(BytesIO(image_bytes)).convert("RGB")
     face = detect_face_box(orig) or _portrait_prior(orig.size)
+    face = _clamp_face_box(orig.size, face)
     mask = _fluid_face_neck_mask(orig.size, face)
     soft = max(3, int(min(orig.size) * 0.01))
     mask = mask.filter(ImageFilter.GaussianBlur(radius=soft))
@@ -82,19 +83,20 @@ def restore_outside_fluid_region(
 def _fluid_face_neck_mask(
     size: tuple[int, int], box: tuple[int, int, int, int]
 ) -> Image.Image:
-    """Tight ellipse: face + tiny neck drip band (avoid raised hands / saree)."""
+    """Tight face oval + short chin drips — never arm/back/torso."""
     w, h = size
-    x, y, fw, fh = box
-    pad_x = int(fw * 0.12)
-    pad_top = int(fh * 0.28)
-    pad_bot = int(fh * 0.28)  # slight neck only — not blouse body
+    x, y, fw, fh = _clamp_face_box(size, box)
+    pad_x = int(fw * 0.10)
+    pad_top = int(fh * 0.12)
+    pad_bot = int(fh * 0.22)  # chin + light neck drips only
     x1 = max(0, x - pad_x)
     y1 = max(0, y - pad_top)
     x2 = min(w, x + fw + pad_x)
     y2 = min(h, y + fh + pad_bot)
-    y2 = min(y2, int(h * 0.42))
+    # Hard stop before mid-torso even on tall full-body frames.
+    y2 = min(y2, y + fh + int(fh * 0.28), int(h * 0.52))
     if y2 <= y1 + 8:
-        y2 = min(h, y1 + max(8, int(h * 0.26)))
+        y2 = min(h, y1 + max(8, int(fh * 1.15)))
     mask = Image.new("L", (w, h), 0)
     ImageDraw.Draw(mask).ellipse([x1, y1, x2, y2], fill=255)
     return mask
@@ -106,26 +108,31 @@ def composite_fluid_highlights(
     *,
     edit_mask_png: bytes | None = None,
 ) -> bytes:
-    """Keep start face/clothes pixel-perfect; paste only whitish gel from the edit.
+    """Keep start face/pose pixel-perfect; add whitish gel on top only.
 
-    Never blends the edited face structure — identity stays the start photo.
-    If no gel is detected, returns the original unchanged (no soft face morph).
+    Facing/identity never come from the edit — we only brighten with gel pixels
+    (or paint procedural ropes if the LoRA laid almost none).
     """
     orig = Image.open(BytesIO(original_bytes)).convert("RGB")
     edit = Image.open(BytesIO(edited_bytes)).convert("RGB")
     if edit.size != orig.size:
         edit = edit.resize(orig.size, Image.Resampling.LANCZOS)
 
+    face = detect_face_box(orig) or _portrait_prior(orig.size)
+    face = _clamp_face_box(orig.size, face)
+    face_zone = _fluid_face_neck_mask(orig.size, face)
     if edit_mask_png:
         zone = Image.open(BytesIO(edit_mask_png)).convert("L")
         if zone.size != orig.size:
             zone = zone.resize(orig.size, Image.Resampling.BILINEAR)
+        # Intersect sampler mask with clamped face — never paint torso/back.
+        z_a = np.asarray(zone, dtype=np.uint8)
+        f_a = np.asarray(face_zone, dtype=np.uint8)
+        zone = Image.fromarray(np.minimum(z_a, f_a), mode="L")
     else:
-        face = detect_face_box(orig) or _portrait_prior(orig.size)
-        zone = _fluid_face_neck_mask(orig.size, face)
+        zone = face_zone
 
     if np is None:
-        # Without numpy, refuse face morph — keep original.
         return original_bytes
 
     o = np.asarray(orig, dtype=np.float32)
@@ -135,34 +142,149 @@ def composite_fluid_highlights(
     el = e[..., 0] * 0.2126 + e[..., 1] * 0.7152 + e[..., 2] * 0.0722
     esat = e.max(axis=2) - e.min(axis=2)
     dy = el - ol
-    # Whitish / cream additions only (not general face rewrite).
-    bright = (dy > 10.0) & (el > 145.0) & (e[..., 0] > 150.0) & (esat < 85.0)
-    chalk = (dy > 14.0) & (el > 185.0) & (esat < 55.0)
+    # Prefer true white/cream; looser than before so heavy facial coverage sticks.
+    bright = (dy > 6.0) & (el > 155.0) & (e[..., 0] > 158.0) & (esat < 70.0)
+    chalk = (dy > 5.0) & (el > 175.0) & (esat < 55.0)
     cream = (
-        (dy > 8.0)
-        & (el > 155.0)
-        & (e[..., 0] > e[..., 2] - 6.0)
-        & (e[..., 0] > e[..., 1] - 10.0)
-        & (esat < 70.0)
+        (dy > 5.0)
+        & (el > 150.0)
+        & (e[..., 0] > 150.0)
+        & (e[..., 0] >= e[..., 2] - 4.0)
+        & (e[..., 0] >= e[..., 1] - 12.0)
+        & (esat < 65.0)
     )
     gel = (bright | chalk | cream) & (z > 0.12)
-    if not np.any(gel):
-        return original_bytes
+    zone_area = float(np.maximum((z > 0.12).sum(), 1))
+    coverage = float(gel.sum()) / zone_area
 
+    # Thicken LoRA gel beads.
     gel_u8 = (gel.astype(np.uint8) * 255)
-    soft = (
-        np.asarray(
-            Image.fromarray(gel_u8, mode="L").filter(
-                ImageFilter.GaussianBlur(radius=max(1.2, min(orig.size) * 0.0035))
-            ),
-            dtype=np.float32,
-        )
-        / 255.0
+    odd = max(5, int(min(orig.size) * 0.009) | 1)
+    if odd % 2 == 0:
+        odd += 1
+    thick = Image.fromarray(gel_u8, mode="L").filter(ImageFilter.MaxFilter(size=odd))
+    thick = thick.filter(
+        ImageFilter.GaussianBlur(radius=max(0.9, min(orig.size) * 0.003))
     )
-    soft = np.maximum(soft, gel.astype(np.float32) * 0.90) * np.clip(z, 0.0, 1.0)
-    # Opaque beads from edit; skin/features always from start photo.
-    out = o * (1.0 - soft[..., None] * 0.92) + e * (soft[..., None] * 0.92)
+    soft = np.asarray(thick, dtype=np.float32) / 255.0
+    soft = np.maximum(soft, gel.astype(np.float32)) * np.clip(z, 0.0, 1.0)
+
+    # Brighten-only: never replace darker face structure (locks facing/identity).
+    out = o.copy()
+    use = soft > 0.25
+    # Take edit where it is brighter (fluid), else keep start.
+    brighter = use & (el >= ol - 2.0)
+    a = np.clip(soft, 0.0, 1.0)[..., None]
+    a = np.where(brighter[..., None], np.maximum(a, 0.85), 0.0)
+    out = out * (1.0 - a) + e * a
+
+    # Always layer heavy procedural facial ropes on the start face (facing locked).
+    # LoRA gel alone is too sparse; this guarantees visible liquid volume.
+    painted = _paint_heavy_facial_fluid(orig, face)
+    p = np.asarray(painted, dtype=np.float32)
+    pl = p[..., 0] * 0.2126 + p[..., 1] * 0.7152 + p[..., 2] * 0.0722
+    add = (pl > ol + 6.0) & (z > 0.10)
+    out = np.where(add[..., None], np.maximum(out, p), out)
+
     return _png_bytes(Image.fromarray(np.clip(out, 0, 255).astype(np.uint8)))
+
+
+def _clamp_face_box(
+    size: tuple[int, int], box: tuple[int, int, int, int]
+) -> tuple[int, int, int, int]:
+    """Keep face box portrait-sized so fluid never paints torso/back/arms."""
+    w, h = size
+    x, y, fw, fh = [int(v) for v in box]
+    area = (fw * fh) / float(max(w * h, 1))
+    # Tall / lookback frames: face is a small upper crop inside a huge skin blob.
+    max_w = int(w * (0.42 if h > w * 1.4 else 0.48))
+    max_h = int(h * (0.22 if h > w * 1.4 else 0.32))
+    if area > 0.12 or fw > max_w or fh > max_h:
+        # Prefer upper portion of the blob (face sits above shoulders/back).
+        cx = x + fw * 0.62
+        cy = y + fh * (0.28 if area > 0.18 else 0.35)
+        side = int(
+            min(
+                max_w,
+                max_h,
+                max(fw, fh) * (0.42 if area > 0.18 else 0.65),
+                min(w, h) * 0.34,
+            )
+        )
+        side = max(side, int(min(w, h) * 0.11))
+        fw = fh = side
+        x = int(max(0, min(w - fw, cx - fw / 2.0)))
+        y = int(max(0, min(h - fh, cy - fh / 2.0)))
+    # Only relocate oversized/low boxes — never teleport tiny false positives.
+    if (y + fh > int(h * 0.55)) and (area > 0.08 or fh > int(h * 0.22)):
+        fh = max(int(min(w, h) * 0.12), int(h * 0.20))
+        y = max(0, int(h * 0.06))
+        fw = min(fw, int(w * 0.45), fh + int(fh * 0.15))
+        x = int(max(0, min(w - fw, x)))
+    return int(x), int(y), int(fw), int(fh)
+
+
+def _paint_heavy_facial_fluid(
+    img: Image.Image, box: tuple[int, int, int, int]
+) -> Image.Image:
+    """Dense translucent cream ropes/drips on face — eyes kept clear, facing locked."""
+    import random
+
+    box = _clamp_face_box(img.size, box)
+    out = img.copy()
+    overlay = Image.new("RGBA", out.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+    x, y, fw, fh = box
+    rnd = random.Random(int(x * 17 + y * 31 + fw * 13 + fh + 7))
+    # Heavier volume but still translucent so face geometry/facing stay readable.
+    cream = (250, 243, 228, 175)
+    thick = (255, 250, 240, 205)
+    drip = (252, 245, 230, 185)
+    gloss = (255, 255, 250, 120)
+
+    def blob(cx: float, cy: float, rx: float, ry: float, fill) -> None:
+        draw.ellipse([cx - rx, cy - ry, cx + rx, cy + ry], fill=fill)
+
+    def strand(x0: float, y0: float, x1: float, y1: float, width: float, fill) -> None:
+        draw.line([(x0, y0), (x1, y1)], fill=fill, width=max(2, int(width)))
+
+    # Forehead splatters + short drips
+    for _ in range(9):
+        cx = x + fw * rnd.uniform(0.12, 0.88)
+        cy = y + fh * rnd.uniform(0.04, 0.24)
+        blob(cx, cy, fw * rnd.uniform(0.05, 0.13), fh * rnd.uniform(0.02, 0.05), thick)
+        strand(cx, cy, cx + fw * rnd.uniform(-0.02, 0.02), cy + fh * rnd.uniform(0.08, 0.18), fw * 0.025, drip)
+        blob(cx, cy + fh * 0.06, fw * 0.025, fh * 0.05, drip)
+    # Cheeks (skip eye band ~0.28–0.42)
+    for side in (0.22, 0.78):
+        for _ in range(6):
+            cx = x + fw * (side + rnd.uniform(-0.06, 0.06))
+            cy = y + fh * rnd.uniform(0.46, 0.72)
+            blob(cx, cy, fw * rnd.uniform(0.05, 0.12), fh * rnd.uniform(0.035, 0.09), cream)
+            blob(cx + fw * 0.01, cy - fh * 0.02, fw * 0.03, fh * 0.025, gloss)
+    # Nose bridge / tip
+    blob(x + fw * 0.50, y + fh * 0.46, fw * 0.055, fh * 0.09, thick)
+    blob(x + fw * 0.50, y + fh * 0.55, fw * 0.045, fh * 0.055, drip)
+    blob(x + fw * 0.50, y + fh * 0.50, fw * 0.02, fh * 0.02, gloss)
+    # Lips + heavy chin ropes
+    blob(x + fw * 0.50, y + fh * 0.72, fw * 0.13, fh * 0.05, thick)
+    for _ in range(7):
+        cx = x + fw * rnd.uniform(0.28, 0.72)
+        cy = y + fh * rnd.uniform(0.78, 0.98)
+        blob(cx, cy, fw * rnd.uniform(0.03, 0.055), fh * rnd.uniform(0.07, 0.14), drip)
+        strand(cx, cy, cx + fw * rnd.uniform(-0.03, 0.03), cy + fh * rnd.uniform(0.05, 0.12), fw * 0.02, cream)
+
+    # Punch clear eye holes so facing/identity stay obvious.
+    eye_y = y + fh * 0.34
+    for side in (0.34, 0.66):
+        ex = x + fw * side
+        draw.ellipse(
+            [ex - fw * 0.11, eye_y - fh * 0.08, ex + fw * 0.11, eye_y + fh * 0.08],
+            fill=(0, 0, 0, 0),
+        )
+
+    soft = overlay.filter(ImageFilter.GaussianBlur(radius=max(1.0, min(out.size) * 0.0028)))
+    return Image.alpha_composite(out.convert("RGBA"), soft).convert("RGB")
 
 
 def _png_bytes(img: Image.Image) -> bytes:
@@ -568,36 +690,84 @@ def detect_face_box(img: Image.Image) -> tuple[int, int, int, int] | None:
     """Return (x, y, w, h) in image pixels, or None."""
     haar = _haar_box(img)
     if haar is not None:
-        return haar
-    return _skin_box(img)
+        return _clamp_face_box(img.size, haar)
+    skin = _skin_box(img)
+    if skin is not None:
+        return _clamp_face_box(img.size, skin)
+    return None
 
 
 def _haar_box(img: Image.Image) -> tuple[int, int, int, int] | None:
+    """Score multi-cascade hits — prefer upper mid-size faces, not body blobs."""
     try:
         import cv2
         import numpy as np
     except Exception:
         return None
-    cascade = None
-    for name in ("haarcascade_frontalface_default.xml", "haarcascade_profileface.xml"):
+    w, h = img.size
+    gray = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2GRAY)
+    cands: list[tuple[float, tuple[int, int, int, int]]] = []
+    names = (
+        "haarcascade_frontalface_alt2.xml",
+        "haarcascade_frontalface_default.xml",
+        "haarcascade_profileface.xml",
+    )
+    min_side = max(24, int(min(w, h) * 0.04))
+    for name in names:
         path = getattr(cv2.data, "haarcascades", "") + name
         try:
-            c = cv2.CascadeClassifier(path)
-            if not c.empty():
-                cascade = c
-                break
+            cascade = cv2.CascadeClassifier(path)
+            if cascade.empty():
+                continue
         except Exception:
             continue
-    if cascade is None:
+        for mn in (3, 4, 5):
+            faces = cascade.detectMultiScale(
+                gray, scaleFactor=1.08, minNeighbors=mn, minSize=(min_side, min_side)
+            )
+            if faces is None or len(faces) == 0:
+                continue
+            for f in faces:
+                x, y, fw, fh = (int(f[0]), int(f[1]), int(f[2]), int(f[3]))
+                area = (fw * fh) / float(max(w * h, 1))
+                cx = (x + fw / 2.0) / w
+                cy = (y + fh / 2.0) / h
+                # Reject body/hip false positives and tiny noise.
+                if area < 0.0009 or area > 0.22:
+                    continue
+                if cy > 0.58:
+                    continue
+                if cy > 0.48 and area > 0.04:
+                    continue
+                # Tiny edge hits are almost always false positives.
+                if area < 0.02 and (cx < 0.14 or cx > 0.86 or cy > 0.48):
+                    continue
+                if fh < fw * 0.7 or fh > fw * 1.45:
+                    continue
+                # Prefer upper faces strongly — shoulders often false-positive as faces.
+                score = (
+                    min(area, 0.08) * 8.0
+                    + (0.62 - cy) * 7.0
+                    + (1.0 - abs(cx - 0.5)) * 0.5
+                )
+                # Mid-torso / shoulder band: heavy penalty unless clearly small face.
+                if 0.32 <= cy <= 0.48 and area > 0.03:
+                    score -= 2.5
+                # Pad undersized detections on tall full-body frames.
+                if area < 0.02 and h > w * 1.2:
+                    target = int(min(w, h) * 0.15)
+                    cur = max(fw, fh)
+                    if cur < target:
+                        pad = target - cur
+                        x = max(0, x - pad // 2)
+                        y = max(0, y - pad // 2)
+                        fw = min(w - x, fw + pad)
+                        fh = min(h - y, fh + pad)
+                cands.append((score, (x, y, fw, fh)))
+    if not cands:
         return None
-    gray = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2GRAY)
-    faces = cascade.detectMultiScale(
-        gray, scaleFactor=1.12, minNeighbors=5, minSize=(32, 32)
-    )
-    if faces is None or len(faces) == 0:
-        return None
-    x, y, w, h = max(faces, key=lambda f: int(f[2]) * int(f[3]))
-    return int(x), int(y), int(w), int(h)
+    cands.sort(key=lambda t: t[0], reverse=True)
+    return cands[0][1]
 
 
 def _skin_box(img: Image.Image) -> tuple[int, int, int, int] | None:

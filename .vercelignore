@@ -1,0 +1,12 @@
+temptest_assets
+.git
+.venv
+venv
+node_modules
+frontend/node_modules
+private
+tokens&cmd
+.env
+.env.local
+*.ipynb
+.pytest_cache
