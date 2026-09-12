@@ -55,11 +55,21 @@ def _comfy_model_roots() -> list[Path]:
 
 
 def _find_weight(filename: str) -> Path | None:
-    if not filename or filename in _SKIP_DISK or "/" in filename or "\\" in filename:
-        if filename and ("/" in filename or filename.startswith("Qwen")):
-            return None
-        if filename in _SKIP_DISK:
-            return None
+    if not filename or filename in _SKIP_DISK:
+        return None
+    # Allow subdirectory paths under a model folder (e.g. loras/miscellaneous/foo.safetensors).
+    rel = filename.replace("\\", "/")
+    if "/" in rel and not rel.startswith("Qwen"):
+        for root in _comfy_model_roots():
+            for sub in ("loras", "controlnet", "diffusion_models", "unet", ""):
+                p = (root / sub / rel) if sub else (root / rel)
+                try:
+                    min_b = _MIN_LORA_BYTES if sub == "loras" else _MIN_WEIGHT_BYTES
+                    if p.is_file() and p.stat().st_size >= min_b:
+                        return p
+                except OSError:
+                    continue
+        return None
     subdirs = (
         "diffusion_models",
         "unet",
@@ -85,6 +95,11 @@ def _find_weight(filename: str) -> Path | None:
                 min_b = _MIN_LORA_BYTES if sub == "loras" else _MIN_WEIGHT_BYTES
                 if p.is_file() and p.stat().st_size >= min_b:
                     return p
+                # Misc staged LoRAs
+                if sub == "loras":
+                    misc = root / "loras" / "miscellaneous" / Path(filename).name
+                    if misc.is_file() and misc.stat().st_size >= min_b:
+                        return misc
             except OSError:
                 continue
     return None

@@ -1297,7 +1297,11 @@ export default function App() {
                     className="prompt-area"
                     rows={5}
                     maxLength={PROMPT_MAX}
-                    placeholder="Describe the changes you want to make…"
+                    placeholder={
+                      mode === "vid"
+                        ? "e.g. oral, oral insertion, reveal penis, missionary, cowgirl, doggy, handjob, cumshot…"
+                        : "e.g. nude, cumshot on face, cuminator, cumhere, enhance boobs…"
+                    }
                     value={prompt}
                     onChange={(e) => setPrompt(e.target.value.slice(0, PROMPT_MAX))}
                   />
