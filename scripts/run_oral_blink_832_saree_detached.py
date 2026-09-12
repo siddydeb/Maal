@@ -1,9 +1,16 @@
-"""Detached 832 oral Blink smoke on orange saree — survives Cursor close."""
+"""Detached 832 oral Blink(+DR34) smoke on orange saree — survives Cursor close.
+
+Env:
+  ORAL_SECONDS   video length (default 5)
+  ORAL_OUT_TAG   folder suffix under tmp_test (default blink_dr34_{N}s_v2)
+  ORAL_SEED      seed (default 43)
+"""
 
 from __future__ import annotations
 
 import asyncio
 import json
+import os
 import subprocess
 import sys
 import traceback
@@ -13,10 +20,13 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
-OUT = REPO / "tmp_test" / "18000_oral_vid_smoke_saree_blink_832"
+SECONDS = float(os.environ.get("ORAL_SECONDS", "5"))
+TAG = os.environ.get("ORAL_OUT_TAG", f"blink_dr34_{int(SECONDS) if SECONDS == int(SECONDS) else SECONDS}s_v2")
+OUT = REPO / "tmp_test" / f"18000_oral_vid_smoke_saree_{TAG}"
 LOG = OUT / "run.log"
 IID = "6a8630fbbd8d7c30d36ddd6b"
 PRESET = "oral"
+SEED = int(os.environ.get("ORAL_SEED", "43"))
 
 
 def _log(msg: str) -> None:
@@ -64,7 +74,7 @@ async def main() -> int:
         nsfw=True,
         motion_kinds=list(motion.get("motion_kinds") or []),
     )
-    _log(f"high={stack.high}")
+    _log(f"high={stack.high} seconds={SECONDS} seed={SEED}")
 
     await db.connect()
     got = await db.get_test_input_bytes(IID, owner=owner)
@@ -84,10 +94,10 @@ async def main() -> int:
                 prompt=prompt,
                 prompt_english=prompt,
                 image_bytes=image_bytes,
-                seed=42,
+                seed=SEED,
                 profile="balanced",
                 channel="stable",
-                video_seconds=3.0,
+                video_seconds=SECONDS,
             ),
             settings=settings,
         )
@@ -119,7 +129,7 @@ async def main() -> int:
     try:
         rec = await db.store_media(
             data=result.data,
-            filename=f"wan_vid_{IID[:8]}_oral_blink832.mp4",
+            filename=f"wan_vid_{IID[:8]}_oral_{TAG}.mp4",
             content_type=result.content_type or "video/mp4",
             kind="vid",
             prompt=prompt,
@@ -130,8 +140,10 @@ async def main() -> int:
                 "preset_id": PRESET,
                 "test_run": True,
                 "source_input_id": IID,
-                "batch": "18000_oral_vid_smoke_saree_blink_832",
+                "batch": f"18000_oral_vid_smoke_saree_{TAG}",
                 "dims": dims,
+                "video_seconds": SECONDS,
+                "seed": SEED,
                 "batch_at": datetime.now(timezone.utc).isoformat(),
             },
         )
@@ -147,6 +159,9 @@ async def main() -> int:
                 "dims": dims,
                 "gen": gen,
                 "label": result.model_label,
+                "seconds": SECONDS,
+                "seed": SEED,
+                "high": stack.high,
             },
             indent=2,
         ),
