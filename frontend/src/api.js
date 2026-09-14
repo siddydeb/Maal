@@ -464,9 +464,12 @@ export async function waitForJob(jobId, { onStatus, signal } = {}) {
       notifyJobDone(job.result);
       return job.result;
     }
-    if (st === "failed") {
+    if (st === "failed" || st === "cancelled") {
       saveActiveJobId(null);
-      throw new Error(job.error || "Generation failed");
+      throw new Error(
+        job.error ||
+          (st === "cancelled" ? "Generation was cancelled." : "Generation failed")
+      );
     }
 
     await sleepVisible(st === "queued" ? 1500 : 2500, signal);

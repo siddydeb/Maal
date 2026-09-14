@@ -610,11 +610,16 @@ export default function App() {
             saveActiveJobId(null);
             return;
           }
-          if (existing.status === "failed") {
+          if (existing.status === "failed" || existing.status === "cancelled") {
             saveActiveJobId(null);
             if (!cancelled) {
-              setStatus(existing.error || "Generation failed");
-              setStatusError(true);
+              setStatus(
+                existing.error ||
+                  (existing.status === "cancelled"
+                    ? "Generation was cancelled."
+                    : "Generation failed")
+              );
+              setStatusError(existing.status === "failed");
             }
             return;
           }
