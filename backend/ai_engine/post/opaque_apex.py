@@ -67,26 +67,24 @@ def opaque_bust_apex(
     if y1 <= y0 + 8 or x1 <= x0 + 8:
         return edited_bytes
 
-    amp = float(np.clip(strength, 0.35, 1.35))
+    # Keep tip kill local — wide multi-seed discs were smearing the whole bust
+    # into a pink haze (visible “blemish”) and flattening volume cues.
+    amp = float(np.clip(strength, 0.25, 0.85))
     centers = _detect_apex_centers(e, mid=mid, y0=y0, y1=y1, x0=x0, x1=x1)
-    # Anatomical seeds at mid-mound (where tips actually land after size-up)
-    cy = int(y0 + (y1 - y0) * 0.42)
-    sep = max(int(w * 0.16), int(fw * 0.50))
+    # Two mid-mound seeds only (left/right); detector peaks fill the rest.
+    cy = int(y0 + (y1 - y0) * 0.45)
+    sep = max(int(w * 0.14), int(fw * 0.45))
     seeded = [
-        (cy, int(mid - sep * 0.70)),
-        (cy, int(mid + sep * 0.70)),
-        (int(y0 + (y1 - y0) * 0.50), int(mid - sep * 0.60)),
-        (int(y0 + (y1 - y0) * 0.50), int(mid + sep * 0.60)),
-        (int(y0 + (y1 - y0) * 0.55), int(mid - sep * 0.50)),
-        (int(y0 + (y1 - y0) * 0.55), int(mid + sep * 0.50)),
+        (cy, int(mid - sep * 0.65)),
+        (cy, int(mid + sep * 0.65)),
     ]
-    centers = _merge_centers(centers + seeded, min_dist=max(12, int(min(h, w) * 0.022)))
+    centers = _merge_centers(centers + seeded, min_dist=max(16, int(min(h, w) * 0.030)))
     # Drop hair / strap / off-bust peaks
     centers = _filter_fabric_centers(e, centers, y0=y0, y1=y1, x0=x0, x1=x1, mid=mid)
 
-    rad = max(34, int(min(w, h) * 0.070 * (0.85 + 0.22 * amp)))
+    rad = max(14, int(min(w, h) * 0.032 * (0.85 + 0.20 * amp)))
     out = _kill_tips(e, o, centers, rad=rad, amp=amp, y_lock=y0)
-    # One residual pass on the result — fabric-filtered only
+    # Light residual pass — smaller radius so fabric texture survives
     residual = _filter_fabric_centers(
         out,
         _detect_apex_centers(out, mid=mid, y0=y0, y1=y1, x0=x0, x1=x1),
@@ -97,7 +95,7 @@ def opaque_bust_apex(
         mid=mid,
     )
     if residual:
-        out = _kill_tips(out, o, residual, rad=int(rad * 0.85), amp=amp, y_lock=y0)
+        out = _kill_tips(out, o, residual, rad=max(10, int(rad * 0.65)), amp=amp * 0.75, y_lock=y0)
     # Soft lock above bust — feather 6px so no hard horizontal seam
     if y0 > 6:
         feather = np.linspace(1.0, 0.0, 6, dtype=np.float32)[:, None, None]
@@ -247,22 +245,23 @@ def _kill_tips(
         mask = np.maximum(mask, a)
     if mask.max() <= 0:
         return edit.copy()
-    mask = cv2.GaussianBlur(mask, (0, 0), max(2.0, rad * 0.08))
-    mask = np.clip(mask * (0.90 + 0.20 * amp), 0.0, 1.0)
+    mask = cv2.GaussianBlur(mask, (0, 0), max(1.2, rad * 0.05))
+    mask = np.clip(mask * (0.55 + 0.25 * amp), 0.0, 0.72)
     m = mask[..., None]
-    out = edit * (1.0 - m * 0.88) + flatter * (m * 0.88)
+    blend = 0.55 + 0.20 * amp  # was ~0.88 — that erased bust folds into a smear
+    out = edit * (1.0 - m * blend) + flatter * (m * blend)
     u8 = np.clip(out, 0, 255).astype(np.uint8)
     lab = cv2.cvtColor(u8, cv2.COLOR_RGB2LAB).astype(np.float32)
     flat_lab = cv2.cvtColor(
         np.clip(flatter, 0, 255).astype(np.uint8), cv2.COLOR_RGB2LAB
     ).astype(np.float32)
-    lab[..., 0] = lab[..., 0] * (1.0 - mask * 0.75) + flat_lab[..., 0] * (mask * 0.75)
-    lab[..., 1] = lab[..., 1] * (1.0 - mask * 0.96) + flat_lab[..., 1] * (mask * 0.96)
-    lab[..., 2] = lab[..., 2] * (1.0 - mask * 0.96) + flat_lab[..., 2] * (mask * 0.96)
+    lab[..., 0] = lab[..., 0] * (1.0 - mask * 0.45) + flat_lab[..., 0] * (mask * 0.45)
+    lab[..., 1] = lab[..., 1] * (1.0 - mask * 0.70) + flat_lab[..., 1] * (mask * 0.70)
+    lab[..., 2] = lab[..., 2] * (1.0 - mask * 0.70) + flat_lab[..., 2] * (mask * 0.70)
     dog = cv2.GaussianBlur(lab[..., 0], (0, 0), 1.0) - cv2.GaussianBlur(
         lab[..., 0], (0, 0), 9.0
     )
-    lab[..., 0] = np.clip(lab[..., 0] - dog * mask * (1.5 * amp), 0, 255)
+    lab[..., 0] = np.clip(lab[..., 0] - dog * mask * (0.85 * amp), 0, 255)
     return cv2.cvtColor(np.clip(lab, 0, 255).astype(np.uint8), cv2.COLOR_LAB2RGB).astype(
         np.float32
     )
