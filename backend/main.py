@@ -9,6 +9,7 @@ import asyncio
 import gc
 import io
 import json
+import threading
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -99,6 +100,7 @@ DIST_DIR = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 # Keep strong refs so asyncio tasks aren't GC'd mid-run
 _background_jobs: set[asyncio.Task] = set()
 _job_tasks: dict[str, asyncio.Task] = {}
+_job_threads: dict[str, threading.Thread] = {}
 
 
 def _track_job_task(job_id: str, task: asyncio.Task) -> None:
@@ -111,6 +113,42 @@ def _track_job_task(job_id: str, task: asyncio.Task) -> None:
             _job_tasks.pop(job_id, None)
 
     task.add_done_callback(_done)
+
+
+def _spawn_job_thread(job_id: str, coro_factory) -> None:
+    """
+    Run generation on a dedicated thread + event loop so Render healthz
+    stays responsive on the main uvicorn loop (free-plan 5s kill).
+    """
+
+    def _target() -> None:
+        async def _wrapped() -> None:
+            # Motor must bind to this thread's loop (not the main API loop).
+            await db.connect()
+            try:
+                await coro_factory()
+            finally:
+                await db.close()
+
+        try:
+            asyncio.run(_wrapped())
+        except Exception as exc:
+            print(f"[wan] job thread crashed job={job_id}: {exc}")
+            try:
+                db.finish_job_if_active_sync(
+                    job_id,
+                    status="failed",
+                    error=f"Worker crashed: {exc}",
+                    finished_at=datetime.now(timezone.utc),
+                )
+            except Exception:
+                pass
+        finally:
+            _job_threads.pop(job_id, None)
+
+    t = threading.Thread(target=_target, name=f"wan-job-{job_id[:8]}", daemon=True)
+    _job_threads[job_id] = t
+    t.start()
 
 
 def _json(data: object, status: int = 200) -> Response:
@@ -137,8 +175,15 @@ async def lifespan(_app: FastAPI):
         if jobs:
             print(f"[wan] resuming {len(jobs)} job(s) after worker start")
             for job in jobs:
-                task = asyncio.create_task(_resume_persisted_job(job))
-                _track_job_task(job["id"], task)
+                jid = job["id"]
+
+                def _factory(j=job):
+                    async def _coro():
+                        await _resume_persisted_job(j)
+
+                    return _coro
+
+                _spawn_job_thread(jid, _factory())
     except Exception as exc:
         print(f"[wan] job resume on startup failed: {exc}")
     settings = get_settings()
@@ -480,22 +525,40 @@ async def start_job(
         preset_id=preset,
         test_run=is_test,
     )
-    task = asyncio.create_task(
-        _run_job(
-            job_id=job["id"],
-            mode=mode,
-            prompt=prompt,
-            prompt_en=prompt_en,
-            image_bytes=image_bytes,
-            negative=negative,
-            seed=seed,
-            resolved=resolved,
-            video_seconds=vid_sec,
-            owner=owner,
-            extra_meta={"preset_id": preset, "test_run": is_test},
-        )
-    )
-    _track_job_task(job["id"], task)
+    jid = job["id"]
+
+    def _factory(
+        job_id=jid,
+        mode=mode,
+        prompt=prompt,
+        prompt_en=prompt_en,
+        image_bytes=image_bytes,
+        negative=negative,
+        seed=seed,
+        resolved=resolved,
+        vid_sec=vid_sec,
+        owner=owner,
+        preset=preset,
+        is_test=is_test,
+    ):
+        async def _coro():
+            await _run_job(
+                job_id=job_id,
+                mode=mode,
+                prompt=prompt,
+                prompt_en=prompt_en,
+                image_bytes=image_bytes,
+                negative=negative,
+                seed=seed,
+                resolved=resolved,
+                video_seconds=vid_sec,
+                owner=owner,
+                extra_meta={"preset_id": preset, "test_run": is_test},
+            )
+
+        return _coro
+
+    _spawn_job_thread(jid, _factory())
     return _json({"id": job["id"], "status": "queued", "mode": mode})
 
 
@@ -689,9 +752,11 @@ async def _execute_generation(
 async def _resume_persisted_job(job: dict) -> None:
     """Re-run a queued/running job after API worker restart using stored start image."""
     job_id = job["id"]
-    image_bytes = await db.get_job_input_bytes(job_id)
+    image_bytes = db.get_job_input_bytes_sync(job_id)
     if not image_bytes:
-        await db.finish_job_if_active(
+        image_bytes = await db.get_job_input_bytes(job_id)
+    if not image_bytes:
+        db.finish_job_if_active_sync(
             job_id,
             status="failed",
             error="Missing start image after API restart. Try again.",
@@ -746,7 +811,7 @@ async def _run_job(
     owner: Optional[str] = None,
     extra_meta: Optional[dict] = None,
 ) -> None:
-    await db.update_job(
+    db.update_job_sync(
         job_id,
         status="running",
         started_at=datetime.now(timezone.utc),
@@ -770,7 +835,7 @@ async def _run_job(
             ),
             timeout=hard_limit,
         )
-        await db.finish_job_if_active(
+        db.finish_job_if_active_sync(
             job_id,
             status="done",
             result=payload,
@@ -778,7 +843,7 @@ async def _run_job(
             finished_at=datetime.now(timezone.utc),
         )
     except asyncio.CancelledError:
-        await db.finish_job_if_active(
+        db.finish_job_if_active_sync(
             job_id,
             status="cancelled",
             error="Cancelled by you.",
@@ -786,7 +851,7 @@ async def _run_job(
         )
         raise
     except asyncio.TimeoutError:
-        await db.finish_job_if_active(
+        db.finish_job_if_active_sync(
             job_id,
             status="failed",
             error=(
@@ -799,14 +864,14 @@ async def _run_job(
         detail = exc.detail
         if not isinstance(detail, str):
             detail = str(detail)
-        await db.finish_job_if_active(
+        db.finish_job_if_active_sync(
             job_id,
             status="failed",
             error=detail,
             finished_at=datetime.now(timezone.utc),
         )
     except Exception as exc:
-        await db.finish_job_if_active(
+        db.finish_job_if_active_sync(
             job_id,
             status="failed",
             error=f"Unexpected error: {exc}",

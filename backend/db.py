@@ -5,42 +5,146 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+import threading
+
 from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase, AsyncIOMotorGridFSBucket
+from pymongo import MongoClient
 
 from backend.config import get_settings
 
 _client: Optional[AsyncIOMotorClient] = None
 _db: Optional[AsyncIOMotorDatabase] = None
 _fs: Optional[AsyncIOMotorGridFSBucket] = None
+_sync_client: Optional[MongoClient] = None
+_tls = threading.local()
+
+
+def _sync_db():
+    """Sync Mongo client shared across job-worker threads."""
+    global _sync_client
+    settings = get_settings()
+    if _sync_client is None:
+        _sync_client = MongoClient(settings.mongodb_uri, serverSelectionTimeoutMS=8000)
+    return _sync_client[settings.mongodb_db]
+
+
+def _sync_jobs():
+    """Sync jobs collection (keeps the API event loop free for healthz)."""
+    return _sync_db()["jobs"]
+
+
+def update_job_sync(job_id: str, **fields: Any) -> None:
+    try:
+        oid = ObjectId(job_id)
+    except Exception:
+        return
+    fields["updated_at"] = datetime.now(timezone.utc)
+    _sync_jobs().update_one({"_id": oid}, {"$set": fields})
+
+
+def finish_job_if_active_sync(
+    job_id: str,
+    *,
+    status: str,
+    **fields: Any,
+) -> None:
+    try:
+        oid = ObjectId(job_id)
+    except Exception:
+        return
+    fields = {
+        **fields,
+        "status": status,
+        "updated_at": datetime.now(timezone.utc),
+    }
+    _sync_jobs().update_one(
+        {"_id": oid, "status": {"$in": ["queued", "running"]}},
+        {"$set": fields},
+    )
+    if status in ("done", "failed", "cancelled"):
+        # Best-effort wipe of start image (async GridFS path may not be available here).
+        try:
+            doc = _sync_jobs().find_one({"_id": oid}, {"input_gridfs_id": 1})
+            gid = doc.get("input_gridfs_id") if doc else None
+            if gid is not None:
+                from gridfs import GridFSBucket
+
+                GridFSBucket(_sync_db(), bucket_name="media").delete(gid)
+                _sync_jobs().update_one({"_id": oid}, {"$unset": {"input_gridfs_id": ""}})
+        except Exception:
+            pass
+
+
+def get_job_input_bytes_sync(job_id: str) -> Optional[bytes]:
+    try:
+        oid = ObjectId(job_id)
+    except Exception:
+        return None
+    doc = _sync_jobs().find_one({"_id": oid}, {"input_gridfs_id": 1})
+    if not doc or not doc.get("input_gridfs_id"):
+        return None
+    try:
+        from gridfs import GridFSBucket
+
+        return GridFSBucket(_sync_db(), bucket_name="media").open_download_stream(
+            doc["input_gridfs_id"]
+        ).read()
+    except Exception:
+        return None
 
 
 async def connect() -> None:
-    global _client, _db, _fs
+    """Bind Motor to the current thread's event loop (main API or job worker)."""
     settings = get_settings()
-    _client = AsyncIOMotorClient(settings.mongodb_uri)
-    _db = _client[settings.mongodb_db]
-    _fs = AsyncIOMotorGridFSBucket(_db, bucket_name="media")
-    # Touch connection early so startup fails if URI is bad
-    await _client.admin.command("ping")
+    client = AsyncIOMotorClient(settings.mongodb_uri)
+    database = client[settings.mongodb_db]
+    bucket = AsyncIOMotorGridFSBucket(database, bucket_name="media")
+    await client.admin.command("ping")
+    if threading.current_thread() is threading.main_thread():
+        global _client, _db, _fs
+        _client = client
+        _db = database
+        _fs = bucket
+    else:
+        _tls.client = client
+        _tls.db = database
+        _tls.fs = bucket
 
 
 async def close() -> None:
-    global _client, _db, _fs
-    if _client is not None:
-        _client.close()
-    _client = None
-    _db = None
-    _fs = None
+    global _client, _db, _fs, _sync_client
+    if threading.current_thread() is threading.main_thread():
+        if _client is not None:
+            _client.close()
+        _client = None
+        _db = None
+        _fs = None
+        if _sync_client is not None:
+            _sync_client.close()
+            _sync_client = None
+    else:
+        client = getattr(_tls, "client", None)
+        if client is not None:
+            client.close()
+        _tls.client = None
+        _tls.db = None
+        _tls.fs = None
 
 
 def db() -> AsyncIOMotorDatabase:
+    local = getattr(_tls, "db", None)
+    if local is not None:
+        return local
     if _db is None:
         raise RuntimeError("Database not connected")
     return _db
 
 
 def fs() -> AsyncIOMotorGridFSBucket:
+    local = getattr(_tls, "fs", None)
+    if local is not None:
+        return local
     if _fs is None:
         raise RuntimeError("GridFS not connected")
     return _fs
