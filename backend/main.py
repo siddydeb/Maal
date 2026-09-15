@@ -193,20 +193,27 @@ async def _read_image_bytes(file: UploadFile) -> bytes:
         raise HTTPException(400, f"Invalid image: {exc}") from exc
 
 
+@app.get("/api/healthz")
+async def healthz():
+    """Render liveness only — must stay instant (no Mongo/Comfy I/O)."""
+    return _json({"ok": True})
+
+
 @app.get("/api/health")
 async def health():
-    """Liveness for Render. Keep under a few seconds."""
+    """App status for the UI. Soft-fail slow Comfy so Render does not kill us mid-job."""
     import asyncio
 
     settings = get_settings()
     try:
-        await asyncio.wait_for(db.db().command("ping"), timeout=2.0)
+        await asyncio.wait_for(db.db().command("ping"), timeout=1.0)
         mongo_ok = True
     except Exception:
         mongo_ok = False
     comfy_ok = False
     try:
-        comfy_ok = await asyncio.wait_for(_comfy().health(), timeout=1.2)
+        # Keep short: tunnel latency during GPU load used to trip Render's 5s health kill.
+        comfy_ok = await asyncio.wait_for(_comfy().health(), timeout=0.6)
     except Exception:
         pass
     return _json(

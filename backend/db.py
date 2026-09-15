@@ -684,7 +684,7 @@ async def reclaim_active_jobs_on_startup() -> list[dict[str, Any]]:
             )
             continue
 
-        if int(doc.get("resume_count") or 0) >= 5:
+        if int(doc.get("resume_count") or 0) >= 20:
             await db().jobs.update_one(
                 {"_id": oid, "status": {"$in": ["queued", "running"]}},
                 {
