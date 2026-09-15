@@ -90,10 +90,30 @@ function sleep(ms, signal) {
 
 function isTransientNetworkError(err) {
   const msg = String(err?.message || err || "");
-  return /fetch|network|Failed to fetch|timed?\s*out|TimeoutError|AbortError|networkerror/i.test(
+  return /fetch|network|Failed to fetch|Load failed|NetworkError|timed?\s*out|TimeoutError|AbortError|networkerror|API unreachable|API server timed out/i.test(
     msg
   );
 }
+
+/**
+ * User-facing copy for browser/API blips — never show raw "Failed to fetch".
+ * @param {"start"|"poll"|"generic"} kind
+ */
+export function friendlyNetworkMessage(err, kind = "generic") {
+  const raw = String(err?.message || err || "");
+  if (!isTransientNetworkError(err) && !/Failed to fetch|Load failed|NetworkError/i.test(raw)) {
+    return raw || "Something went wrong. Try again.";
+  }
+  if (kind === "start") {
+    return "Server reconnecting — wait a moment and try Generate again. If a job already started, check Library.";
+  }
+  if (kind === "poll") {
+    return "Server reconnecting — generation may still be running. Check Library in a minute, or reopen this screen.";
+  }
+  return "Server reconnecting — wait a moment, then retry. Check Library if a generation was already in progress.";
+}
+
+export { isTransientNetworkError };
 
 function isTransientComfyError(err) {
   const msg = String(err?.message || err || "");
@@ -144,7 +164,7 @@ export async function wakeApi({ onStatus, signal, attempts = 5 } = {}) {
   }
   throw new Error(
     lastErr && isTransientNetworkError(lastErr)
-      ? "API server timed out waking up. Wait 30–60s and tap Generate again (Render free tier sleeps when idle)."
+      ? friendlyNetworkMessage(lastErr, "start")
       : String(lastErr?.message || lastErr || "API unreachable")
   );
 }
@@ -171,7 +191,13 @@ export async function listGenerations(limitOrOpts = 30, maybeSkip = 0) {
     window.location.reload();
     throw new Error("Session expired");
   }
-  if (!res.ok) throw new Error("Failed to load library");
+  if (!res.ok) {
+    throw new Error(
+      res.status >= 500
+        ? "Server reconnecting — Library will load when the API is back. Try again in a moment."
+        : "Failed to load library"
+    );
+  }
   const data = await res.json();
   // Older API returned a bare array
   if (Array.isArray(data)) {
@@ -310,7 +336,7 @@ export async function startJob({
   }
   throw new Error(
     isTransientNetworkError(lastErr)
-      ? "Could not reach API to start the job (timeout). Wait a moment and try again — nothing was queued."
+      ? friendlyNetworkMessage(lastErr, "start")
       : String(lastErr?.message || lastErr || "Failed to start job")
   );
 }
@@ -448,7 +474,7 @@ export async function waitForJob(jobId, { onStatus, signal } = {}) {
       onStatus?.({
         status: "waiting",
         message:
-          "Still generating on the server. Your phone briefly lost the status link — reconnecting…",
+          "Server reconnecting — still generating on the GPU. Check Library if this screen drops.",
         transientFails,
       });
       await sleepVisible(Math.min(8000, 2000 + transientFails * 500), signal);
@@ -476,7 +502,7 @@ export async function waitForJob(jobId, { onStatus, signal } = {}) {
   }
 
   throw new Error(
-    "Timed out waiting for the server. If Comfy was busy, wait and check Library — otherwise try again."
+    "Timed out waiting for status updates. Generation may still finish on the GPU — check Library in a few minutes."
   );
 }
 

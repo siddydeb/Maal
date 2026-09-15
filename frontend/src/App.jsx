@@ -27,6 +27,8 @@ import {
   testRefThumbUrl,
   listPresets,
   listReviewBins,
+  friendlyNetworkMessage,
+  isTransientNetworkError,
 } from "./api";
 import { clearSession, getOwnerId, isAdminOwner, isTesterOwner } from "./auth";
 import { presetById, presetsForMode, setActionPresets } from "./presets";
@@ -325,8 +327,8 @@ export default function App() {
     if (/GPU_AGENT|GPU helper|GPU restart isn’t set up/i.test(msg)) {
       return "GPU restart isn’t set up yet. The GPU helper app needs to be running first.";
     }
-    if (/timed?\s*out|Failed to fetch|network|unreachable|waking/i.test(msg)) {
-      return "Can’t reach the server right now. Wait a minute and try again.";
+    if (/timed?\s*out|Failed to fetch|network|unreachable|waking|Load failed|NetworkError/i.test(msg)) {
+      return friendlyNetworkMessage(err, "generic");
     }
     if (/doesn’t look right|Tunnel URL must be https|Paste a full https/i.test(msg)) {
       return "That link doesn’t look right. Paste a full https://…trycloudflare.com address.";
@@ -335,6 +337,13 @@ export default function App() {
       return "Something went wrong on the server side. Wait a minute and try again.";
     }
     return msg || "Something went wrong. Try again.";
+  }
+
+  function statusFromErr(err, kind = "generic") {
+    if (isTransientNetworkError(err)) {
+      return { text: friendlyNetworkMessage(err, kind), error: false };
+    }
+    return { text: String(err?.message || err || "Something went wrong."), error: true };
   }
 
   async function runOps(action) {
@@ -640,10 +649,8 @@ export default function App() {
         // Page refresh / StrictMode remount aborts polling — keep job id for next mount
         if (msg === "Cancelled") return;
         if (!cancelled) {
-          if (/fetch|network|Failed to fetch/i.test(msg)) {
-            setStatus(
-              "Connection dropped — reopen Wan shortly; check Library if it finished."
-            );
+          if (isTransientNetworkError(err) || /fetch|network|Failed to fetch|Load failed/i.test(msg)) {
+            setStatus(friendlyNetworkMessage(err, "poll"));
             setStatusError(false);
           } else {
             setStatus(msg);
@@ -720,8 +727,9 @@ export default function App() {
       window.scrollTo({ top: 0, behavior: "smooth" });
       requestAnimationFrame(() => promptRef.current?.focus());
     } catch (err) {
-      setStatus(String(err.message || err));
-      setStatusError(true);
+      const s = statusFromErr(err);
+      setStatus(s.text);
+      setStatusError(s.error);
     } finally {
       setBusyId(null);
     }
@@ -789,8 +797,9 @@ export default function App() {
       setStatus("Job cancelled.");
       setStatusError(false);
     } catch (err) {
-      setStatus(String(err.message || err));
-      setStatusError(true);
+      const s = statusFromErr(err);
+      setStatus(s.text);
+      setStatusError(s.error);
     } finally {
       setBusyId(null);
     }
@@ -873,6 +882,10 @@ export default function App() {
         );
         setStatusError(false);
         refreshOngoing();
+      } else if (isTransientNetworkError(err) || /Failed to fetch|Load failed|NetworkError/i.test(msg)) {
+        setStatus(friendlyNetworkMessage(err, "poll"));
+        setStatusError(false);
+        refreshOngoing();
       } else {
         setStatus(msg);
         setStatusError(true);
@@ -932,8 +945,9 @@ export default function App() {
       setStatus("Prompt updated in MongoDB.");
       refreshLibrary();
     } catch (err) {
-      setStatus(String(err.message || err));
-      setStatusError(true);
+      const s = statusFromErr(err);
+      setStatus(s.text);
+      setStatusError(s.error);
     } finally {
       setBusyId(null);
     }
@@ -953,8 +967,9 @@ export default function App() {
       setStatus("Deleted from MongoDB.");
       refreshLibrary();
     } catch (err) {
-      setStatus(String(err.message || err));
-      setStatusError(true);
+      const s = statusFromErr(err);
+      setStatus(s.text);
+      setStatusError(s.error);
     } finally {
       setBusyId(null);
     }
@@ -968,8 +983,9 @@ export default function App() {
       await downloadGeneration(item);
       setStatus("Download started.");
     } catch (err) {
-      setStatus(String(err.message || err));
-      setStatusError(true);
+      const s = statusFromErr(err);
+      setStatus(s.text);
+      setStatusError(s.error);
     } finally {
       setBusyId(null);
     }
