@@ -647,12 +647,30 @@ async def reclaim_active_jobs_on_startup() -> list[dict[str, Any]]:
     now = datetime.now(timezone.utc)
     settings = get_settings()
     max_age = max(120, int(settings.comfyui_timeout_sec) + 120)
+    # Wall-clock from create — do not reset when resume clears started_at.
+    max_wall = max(900, min(max_age, 1800))
     reclaimable: list[dict[str, Any]] = []
 
     cursor = db().jobs.find({"status": {"$in": ["queued", "running"]}})
     async for doc in cursor:
         oid = doc["_id"]
-        anchor = _as_utc(doc.get("started_at")) or _as_utc(doc.get("created_at"))
+        created = _as_utc(doc.get("created_at"))
+        if created is not None and (now - created).total_seconds() >= max_wall:
+            await db().jobs.update_one(
+                {"_id": oid, "status": {"$in": ["queued", "running"]}},
+                {
+                    "$set": {
+                        "status": "failed",
+                        "error": _STALE_MSG,
+                        "finished_at": now,
+                        "updated_at": now,
+                    }
+                },
+            )
+            await delete_job_input(str(oid))
+            continue
+
+        anchor = _as_utc(doc.get("started_at")) or created
         if anchor is not None:
             age = (now - anchor).total_seconds()
             if age >= max_age:
@@ -684,7 +702,7 @@ async def reclaim_active_jobs_on_startup() -> list[dict[str, Any]]:
             )
             continue
 
-        if int(doc.get("resume_count") or 0) >= 20:
+        if int(doc.get("resume_count") or 0) >= 8:
             await db().jobs.update_one(
                 {"_id": oid, "status": {"$in": ["queued", "running"]}},
                 {
@@ -734,13 +752,30 @@ async def _maybe_fail_stale_job(doc: dict[str, Any]) -> dict[str, Any]:
         return doc
     settings = get_settings()
     max_age = max(120, int(settings.comfyui_timeout_sec) + 120)
-    anchor = _as_utc(doc.get("started_at")) or _as_utc(doc.get("created_at"))
+    max_wall = max(900, min(max_age, 1800))
+    now = datetime.now(timezone.utc)
+    created = _as_utc(doc.get("created_at"))
+    if created is not None and (now - created).total_seconds() >= max_wall:
+        await db().jobs.update_one(
+            {"_id": doc["_id"], "status": {"$in": ["queued", "running"]}},
+            {
+                "$set": {
+                    "status": "failed",
+                    "error": _STALE_MSG,
+                    "finished_at": now,
+                    "updated_at": now,
+                }
+            },
+        )
+        await delete_job_input(str(doc["_id"]))
+        refreshed = await db().jobs.find_one({"_id": doc["_id"]})
+        return _serialize_job(refreshed) if refreshed else doc
+    anchor = _as_utc(doc.get("started_at")) or created
     if anchor is None:
         return doc
-    age = (datetime.now(timezone.utc) - anchor).total_seconds()
+    age = (now - anchor).total_seconds()
     if age < max_age:
         return doc
-    now = datetime.now(timezone.utc)
     await db().jobs.update_one(
         {"_id": doc["_id"], "status": {"$in": ["queued", "running"]}},
         {
@@ -754,7 +789,7 @@ async def _maybe_fail_stale_job(doc: dict[str, Any]) -> dict[str, Any]:
     )
     await delete_job_input(str(doc["_id"]))
     refreshed = await db().jobs.find_one({"_id": doc["_id"]})
-    return refreshed or doc
+    return _serialize_job(refreshed) if refreshed else doc
 
 
 def _serialize_job(doc: dict[str, Any]) -> dict[str, Any]:
