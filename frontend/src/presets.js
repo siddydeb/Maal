@@ -52,10 +52,10 @@ export const ACTION_PRESETS = [
   {
     id: "oral",
     label: "Oral",
-    hint: "with a man",
+    hint: "full BJ sequence",
     mode: "vid",
     prompt:
-      "Only change: she is already mid continuous blowjob on one man. Keep her exact same face. One continuous shot. PENISLORA.",
+      "Only change: full continuous blowjob sequence on one man. From frame 1 she is already mid continuous blowjob with exactly one erect penis fully in her mouth. Then multiple deep in-and-out strokes with visible full-shaft travel for the whole clip. Keep her exact same face. One continuous shot. PENISLORA.",
   },
   {
     id: "sex",
