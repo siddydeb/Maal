@@ -861,7 +861,10 @@ async def _run_job(
     )
     settings = get_settings()
     # Hard ceiling so a hung WS/tunnel cannot leave the job "running" forever.
+    # Wan oral I2V often needs 35–45 min; keep video above image timeout.
     hard_limit = max(180, int(settings.comfyui_timeout_sec) + 90)
+    if mode == "vid":
+        hard_limit = max(hard_limit, 3600)
     try:
         payload = await asyncio.wait_for(
             _execute_generation(
