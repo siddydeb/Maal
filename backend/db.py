@@ -816,7 +816,9 @@ async def reclaim_active_jobs_on_startup() -> list[dict[str, Any]]:
     settings = get_settings()
     max_age = max(120, int(settings.comfyui_timeout_sec) + 120)
     # Wall-clock from create — do not reset when resume clears started_at.
-    max_wall = max(900, min(max_age, 1800))
+    # Oral/Wan I2V routinely needs ~35 min; the old 1800s cap killed jobs
+    # that Comfy later finished (nothing stored to Mongo).
+    max_wall = max(900, min(max_age, 3600))
     reclaimable: list[dict[str, Any]] = []
 
     cursor = db().jobs.find({"status": {"$in": ["queued", "running"]}})
@@ -920,7 +922,7 @@ async def _maybe_fail_stale_job(doc: dict[str, Any]) -> dict[str, Any]:
         return doc
     settings = get_settings()
     max_age = max(120, int(settings.comfyui_timeout_sec) + 120)
-    max_wall = max(900, min(max_age, 1800))
+    max_wall = max(900, min(max_age, 3600))
     now = datetime.now(timezone.utc)
     created = _as_utc(doc.get("created_at"))
     if created is not None and (now - created).total_seconds() >= max_wall:
