@@ -330,16 +330,20 @@ async def get_generation(
     return _serialize(doc) if doc else None
 
 
-async def get_media_bytes(
+async def open_media_stream(
     gen_id: str, *, owner: Optional[str] = None
-) -> Optional[tuple[bytes, str, str]]:
+) -> Optional[tuple[Any, int, str, str]]:
+    """GridFS handle for true chunked serving — never buffers the whole file.
+
+    Videos can run tens of MB; reading the full body into RAM per request
+    scales badly under concurrent viewers on a memory-capped instance.
+    """
     doc = await get_generation(gen_id, owner=owner)
     if not doc:
         return None
     grid_id = ObjectId(doc["gridfs_id"])
     stream = await fs().open_download_stream(grid_id)
-    data = await stream.read()
-    return data, doc["content_type"], doc["filename"]
+    return stream, stream.length, doc["content_type"], doc["filename"]
 
 
 def _placeholder_thumb_jpeg(max_w: int) -> bytes:
@@ -672,6 +676,40 @@ async def list_recent_jobs(
     return [_serialize_job(doc) async for doc in cursor]
 
 
+async def get_avg_duration_sec(mode: str, *, sample: int = 20) -> Optional[float]:
+    """Median wall-clock duration (started_at -> finished_at) of the most
+    recent completed jobs for this mode, used to power ETA estimates."""
+    cursor = (
+        db()
+        .jobs.find(
+            {
+                "mode": mode,
+                "status": "done",
+                "started_at": {"$ne": None},
+                "finished_at": {"$ne": None},
+            }
+        )
+        .sort("finished_at", -1)
+        .limit(max(1, min(int(sample), 100)))
+    )
+    durations: list[float] = []
+    async for doc in cursor:
+        started = _as_utc(doc.get("started_at"))
+        finished = _as_utc(doc.get("finished_at"))
+        if started is None or finished is None:
+            continue
+        secs = (finished - started).total_seconds()
+        if secs > 0:
+            durations.append(secs)
+    if not durations:
+        return None
+    durations.sort()
+    mid = len(durations) // 2
+    if len(durations) % 2:
+        return durations[mid]
+    return (durations[mid - 1] + durations[mid]) / 2
+
+
 async def get_job(
     job_id: str, *, owner: Optional[str] = None
 ) -> Optional[dict[str, Any]]:
@@ -900,7 +938,7 @@ def _serialize_job(doc: dict[str, Any]) -> dict[str, Any]:
     out = _serialize(doc)
     for key in ("started_at", "finished_at"):
         if key in out and hasattr(out[key], "isoformat"):
-            out[key] = out[key].isoformat()
+            out[key] = _as_utc(out[key]).isoformat()
     # Never leak GridFS ObjectIds oddly; stringify if present
     if "input_gridfs_id" in out and out["input_gridfs_id"] is not None:
         out["input_gridfs_id"] = str(out["input_gridfs_id"])
@@ -917,15 +955,15 @@ def _serialize(doc: dict[str, Any]) -> dict[str, Any]:
     if "gridfs_id" in out and not isinstance(out["gridfs_id"], str):
         out["gridfs_id"] = str(out["gridfs_id"])
     if "created_at" in out and hasattr(out["created_at"], "isoformat"):
-        out["created_at"] = out["created_at"].isoformat()
+        out["created_at"] = _as_utc(out["created_at"]).isoformat()
     if "updated_at" in out and hasattr(out["updated_at"], "isoformat"):
-        out["updated_at"] = out["updated_at"].isoformat()
+        out["updated_at"] = _as_utc(out["updated_at"]).isoformat()
     meta = out.get("meta")
     if isinstance(meta, dict):
         cleaned = dict(meta)
         for key, val in list(cleaned.items()):
             if hasattr(val, "isoformat"):
-                cleaned[key] = val.isoformat()
+                cleaned[key] = _as_utc(val).isoformat()
         out["meta"] = cleaned
     gid = out.get("id")
     if gid and out.get("gridfs_id"):

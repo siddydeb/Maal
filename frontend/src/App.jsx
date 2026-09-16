@@ -25,6 +25,7 @@ import {
   markGenerationOpened,
   listTestRefs,
   testRefThumbUrl,
+  getEta,
   listPresets,
   listReviewBins,
   friendlyNetworkMessage,
@@ -151,6 +152,14 @@ function formatElapsed(fromIso) {
   return m > 0 ? `${m}m ${String(r).padStart(2, "0")}s` : `${r}s`;
 }
 
+function formatEstimate(sec) {
+  if (!Number.isFinite(sec) || sec <= 0) return null;
+  const m = sec / 60;
+  if (m < 1) return `~${Math.max(1, Math.round(sec))}s`;
+  if (m < 10) return `~${Math.round(m * 2) / 2} min`;
+  return `~${Math.round(m)} min`;
+}
+
 function statusForJob(j) {
   if (!j) return null;
   if (j.status === "waking") {
@@ -215,6 +224,7 @@ export default function App() {
   const [tunnelInput, setTunnelInput] = useState("");
   const [opsOpen, setOpsOpen] = useState(true);
   const [, setPresetRev] = useState(0);
+  const [eta, setEta] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -230,6 +240,12 @@ export default function App() {
         if (!cancelled && bins?.bins?.length) setReviewBins(bins.bins);
       } catch {
         /* tester-only */
+      }
+      try {
+        const data = await getEta();
+        if (!cancelled && data) setEta(data);
+      } catch {
+        /* fall back to static estimate */
       }
       if (!cancelled) setPresetRev((n) => n + 1);
     })();
@@ -997,8 +1013,14 @@ export default function App() {
       ? "Generate video"
       : "Generate image";
 
-  const estimateLabel =
-    mode === "vid" ? "Estimated time: 2–5 min" : "Estimated time: 1–3 min";
+  const measuredEstimate = formatEstimate(
+    mode === "vid" ? eta?.vid_sec : eta?.img_sec
+  );
+  const estimateLabel = measuredEstimate
+    ? `Estimated time: ${measuredEstimate}`
+    : mode === "vid"
+      ? "Estimated time: 2–5 min"
+      : "Estimated time: 1–3 min";
 
   const resultIsImage =
     result &&

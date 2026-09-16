@@ -65,6 +65,14 @@ export async function listPresets() {
   return readJson(res);
 }
 
+export async function getEta() {
+  const res = await fetch(url("/api/eta"), {
+    headers: authHeaders(),
+    cache: "no-store",
+  });
+  return readJson(res);
+}
+
 export async function listReviewBins() {
   const res = await fetch(url("/api/test/review-bins"), {
     headers: authHeaders(),

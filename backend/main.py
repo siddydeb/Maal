@@ -102,6 +102,11 @@ _background_jobs: set[asyncio.Task] = set()
 _job_tasks: dict[str, asyncio.Task] = {}
 _job_threads: dict[str, threading.Thread] = {}
 
+# Comfy only has one GPU, so running more than one job's worth of image/video
+# buffers in memory at once buys no throughput and is what blew past Render's
+# free-plan 512MB limit (worst on restart, when every resumed job fired at once).
+_JOB_SLOT = threading.Semaphore(1)
+
 
 def _track_job_task(job_id: str, task: asyncio.Task) -> None:
     _background_jobs.add(task)
@@ -130,6 +135,7 @@ def _spawn_job_thread(job_id: str, coro_factory) -> None:
             finally:
                 await db.close()
 
+        _JOB_SLOT.acquire()
         try:
             asyncio.run(_wrapped())
         except Exception as exc:
@@ -145,6 +151,7 @@ def _spawn_job_thread(job_id: str, coro_factory) -> None:
                 pass
         finally:
             _job_threads.pop(job_id, None)
+            _JOB_SLOT.release()
 
     t = threading.Thread(target=_target, name=f"wan-job-{job_id[:8]}", daemon=True)
     _job_threads[job_id] = t
@@ -967,6 +974,14 @@ async def list_presets(_owner: str = Depends(require_owner)):
     return _json({"presets": presets})
 
 
+@app.get("/api/eta")
+async def eta(_owner: str = Depends(require_owner)):
+    """Median observed generation time per mode, from recently completed jobs."""
+    img_sec = await db.get_avg_duration_sec("img")
+    vid_sec = await db.get_avg_duration_sec("vid")
+    return _json({"img_sec": img_sec, "vid_sec": vid_sec})
+
+
 @app.get("/api/test/review-bins")
 async def list_review_bins(_tester: str = Depends(require_tester)):
     from backend.ai_engine.runtime_overlay import load_json
@@ -1177,16 +1192,28 @@ async def media(
     download: int = 0,
     owner: str = Depends(require_owner),
 ):
-    result = await db.get_media_bytes(gen_id, owner=owner)
+    result = await db.open_media_stream(gen_id, owner=owner)
     if not result:
         raise HTTPException(404, "Not found")
-    data, content_type, filename = result
+    stream, length, content_type, filename = result
     disposition = "attachment" if int(download or 0) else "inline"
     headers = {
         **NO_STORE,
         "Content-Disposition": f'{disposition}; filename="{filename}"',
+        "Content-Length": str(length),
     }
-    return StreamingResponse(io.BytesIO(data), media_type=content_type, headers=headers)
+
+    async def _chunks():
+        try:
+            while True:
+                chunk = await stream.readchunk()
+                if not chunk:
+                    break
+                yield chunk
+        finally:
+            stream.close()
+
+    return StreamingResponse(_chunks(), media_type=content_type, headers=headers)
 
 
 @app.get("/api/media/{gen_id}/thumb")
