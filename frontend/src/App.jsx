@@ -195,6 +195,7 @@ export default function App() {
   const [prompt, setPrompt] = useState("");
   const [loading, setLoading] = useState(false);
   const [busyId, setBusyId] = useState(null);
+  const [usingAsInput, setUsingAsInput] = useState(false);
   const [status, setStatus] = useState("");
   const [statusError, setStatusError] = useState(false);
   const [result, setResult] = useState(null);
@@ -715,7 +716,7 @@ export default function App() {
   }
 
   async function useAsInput(item) {
-    if (!item?.id) return;
+    if (!item?.id || usingAsInput) return;
     const isVid =
       item.kind === "vid" || (item.content_type || "").startsWith("video/");
     if (isVid) {
@@ -725,9 +726,11 @@ export default function App() {
       return;
     }
 
+    setLightbox(null);
     setBusyId(item.id);
+    setUsingAsInput(true);
     setStatusError(false);
-    setStatus("Loading image into editor…");
+    setStatus("Using as input…");
     try {
       const f = await fetchMediaAsFile(item);
       pickFile(f);
@@ -748,6 +751,7 @@ export default function App() {
       setStatusError(s.error);
     } finally {
       setBusyId(null);
+      setUsingAsInput(false);
     }
   }
 
@@ -1506,10 +1510,10 @@ export default function App() {
                       <button
                         type="button"
                         className="ghost"
-                        disabled={busyId === result.id || loading}
+                        disabled={busyId === result.id || loading || usingAsInput}
                         onClick={() => useAsInput(result)}
                       >
-                        use as input
+                        {busyId === result.id ? "using…" : "use as input"}
                       </button>
                     )}
                     {editing ? (
@@ -2004,6 +2008,22 @@ export default function App() {
         )}
       </nav>
 
+      {usingAsInput && (
+        <div
+          className="input-progress"
+          role="dialog"
+          aria-modal="true"
+          aria-busy="true"
+          aria-label="Using as input"
+        >
+          <div className="input-progress-card">
+            <span className="spinner input-progress-spinner" aria-hidden="true" />
+            <p className="input-progress-title">Using as input</p>
+            <p className="input-progress-sub">Loading image into the editor…</p>
+          </div>
+        </div>
+      )}
+
       {lightbox && (
         <div
           className="lightbox"
@@ -2047,13 +2067,10 @@ export default function App() {
                   <button
                     type="button"
                     className="ghost"
-                    disabled={busyId === lightbox.id || loading}
-                    onClick={() => {
-                      setLightbox(null);
-                      useAsInput(lightbox);
-                    }}
+                    disabled={busyId === lightbox.id || loading || usingAsInput}
+                    onClick={() => useAsInput(lightbox)}
                   >
-                    use as input
+                    {busyId === lightbox.id ? "using…" : "use as input"}
                   </button>
                 )}
               </div>

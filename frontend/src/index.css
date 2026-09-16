@@ -1325,6 +1325,52 @@ button.gallery-item {
   transform: scale(0.97);
 }
 
+/* Use-as-input progress dialog */
+.input-progress {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  background: rgba(4, 6, 5, 0.78);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.25rem;
+  backdrop-filter: blur(8px);
+}
+
+.input-progress-card {
+  width: min(20rem, 100%);
+  padding: 1.35rem 1.25rem 1.2rem;
+  border-radius: var(--radius);
+  border: 1px solid var(--line);
+  background: var(--bg1);
+  text-align: center;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.45);
+}
+
+.input-progress-spinner {
+  width: 1.5rem;
+  height: 1.5rem;
+  margin: 0 auto 0.85rem;
+  display: block;
+  border-color: rgba(232, 239, 233, 0.22);
+  border-top-color: var(--accent);
+}
+
+.input-progress-title {
+  margin: 0;
+  font-family: var(--display);
+  font-size: 1.35rem;
+  color: var(--ink);
+  letter-spacing: 0.01em;
+}
+
+.input-progress-sub {
+  margin: 0.4rem 0 0;
+  font-size: 0.88rem;
+  color: var(--muted);
+}
+
 /* Lightbox */
 .lightbox {
   position: fixed;
