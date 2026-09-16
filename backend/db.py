@@ -58,10 +58,19 @@ def finish_job_if_active_sync(
         "status": status,
         "updated_at": datetime.now(timezone.utc),
     }
-    _sync_jobs().update_one(
-        {"_id": oid, "status": {"$in": ["queued", "running"]}},
-        {"$set": fields},
-    )
+    # If FE polled stale-fail while the worker was still generating, still accept
+    # a late "done" so the video is saved instead of discarded.
+    status_filter: dict[str, Any]
+    if status == "done":
+        status_filter = {
+            "$or": [
+                {"status": {"$in": ["queued", "running"]}},
+                {"status": "failed", "error": _STALE_MSG},
+            ]
+        }
+    else:
+        status_filter = {"status": {"$in": ["queued", "running"]}}
+    _sync_jobs().update_one({"_id": oid, **status_filter}, {"$set": fields})
     if status in ("done", "failed", "cancelled"):
         # Best-effort wipe of start image (async GridFS path may not be available here).
         try:
@@ -780,10 +789,17 @@ async def finish_job_if_active(
         "status": status,
         "updated_at": datetime.now(timezone.utc),
     }
-    await db().jobs.update_one(
-        {"_id": oid, "status": {"$in": ["queued", "running"]}},
-        {"$set": fields},
-    )
+    if status == "done":
+        filt: dict[str, Any] = {
+            "_id": oid,
+            "$or": [
+                {"status": {"$in": ["queued", "running"]}},
+                {"status": "failed", "error": _STALE_MSG},
+            ],
+        }
+    else:
+        filt = {"_id": oid, "status": {"$in": ["queued", "running"]}}
+    await db().jobs.update_one(filt, {"$set": fields})
     doc = await db().jobs.find_one({"_id": oid})
     if doc and status in ("done", "failed"):
         await delete_job_input(job_id)
@@ -797,6 +813,17 @@ _ORPHAN_NO_PAYLOAD_MSG = (
 _STALE_MSG = (
     "Generation timed out on the server. Comfy may still be busy; wait a minute, then try again."
 )
+
+
+def _job_age_limits(doc: Optional[dict[str, Any]] = None) -> tuple[int, int]:
+    """Return (max_age_from_start, max_wall_from_create) in seconds."""
+    settings = get_settings()
+    max_age = max(120, int(settings.comfyui_timeout_sec) + 120)
+    # Wan oral I2V routinely needs 35–50 min; FE polls must not kill at ~42 min.
+    if (doc or {}).get("mode") == "vid":
+        max_age = max(max_age, 3600)
+    max_wall = max(3600, max_age + 900)
+    return max_age, max_wall
 
 
 def _as_utc(dt: Any) -> Optional[datetime]:
@@ -813,16 +840,13 @@ async def reclaim_active_jobs_on_startup() -> list[dict[str, Any]]:
     Legacy jobs without input_gridfs_id cannot be resumed and are failed.
     """
     now = datetime.now(timezone.utc)
-    settings = get_settings()
-    max_age = max(120, int(settings.comfyui_timeout_sec) + 120)
-    # Wall-clock from create — must outlive resumes + long Wan I2V (~35–45 min).
-    # Do NOT cap at max_age (that killed oral jobs at ~42 min with no Mongo save).
-    max_wall = max(3600, max_age + 900)
+    max_age, max_wall = _job_age_limits()
     reclaimable: list[dict[str, Any]] = []
 
     cursor = db().jobs.find({"status": {"$in": ["queued", "running"]}})
     async for doc in cursor:
         oid = doc["_id"]
+        max_age, max_wall = _job_age_limits(doc)
         created = _as_utc(doc.get("created_at"))
         if created is not None and (now - created).total_seconds() >= max_wall:
             await db().jobs.update_one(
@@ -919,9 +943,7 @@ async def _maybe_fail_stale_job(doc: dict[str, Any]) -> dict[str, Any]:
     status = doc.get("status")
     if status not in ("queued", "running"):
         return doc
-    settings = get_settings()
-    max_age = max(120, int(settings.comfyui_timeout_sec) + 120)
-    max_wall = max(3600, max_age + 900)
+    max_age, max_wall = _job_age_limits(doc)
     now = datetime.now(timezone.utc)
     created = _as_utc(doc.get("created_at"))
     if created is not None and (now - created).total_seconds() >= max_wall:

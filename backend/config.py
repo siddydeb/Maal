@@ -21,8 +21,8 @@ class Settings(BaseSettings):
     mongodb_db: str = "wan_studio"
 
     comfyui_url: str = "http://127.0.0.1:8188"
-    # Extra quality (36+ steps, dual-stage LoRAs, 5s) often exceeds 20 min on 16GB.
-    comfyui_timeout_sec: int = 2400
+    # Wan oral I2V on 16GB often needs 35–50 min (52 steps, dual LoRA stage).
+    comfyui_timeout_sec: int = 3600
     comfyui_dir: Optional[str] = None
 
     zero_residue: bool = True
