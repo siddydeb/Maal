@@ -253,7 +253,7 @@ async def healthz():
 
 @app.get("/api/health")
 async def health():
-    """App status for the UI. Soft-fail slow Comfy so Render does not kill us mid-job."""
+    """App status for the UI. Soft-fail unreachable/slow Comfy (liveness is /api/healthz)."""
     import asyncio
 
     settings = get_settings()
@@ -264,8 +264,13 @@ async def health():
         mongo_ok = False
     comfy_ok = False
     try:
-        # Keep short: tunnel latency during GPU load used to trip Render's 5s health kill.
-        comfy_ok = await asyncio.wait_for(_comfy().health(), timeout=0.6)
+        # UI-only path (Render liveness is /api/healthz). 0.6s caused frequent false
+        # "GPU offline" when the Cloudflare hop was merely slow; 3s is enough for
+        # normal tunnel RTT without hanging the status poll.
+        comfy_ok = await asyncio.wait_for(
+            _comfy().health(timeout=2.5, retries=1),
+            timeout=3.0,
+        )
     except Exception:
         pass
     return _json(
