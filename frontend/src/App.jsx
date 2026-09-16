@@ -842,6 +842,7 @@ export default function App() {
     videoSeconds: secs,
     presetId,
   }) {
+    if (loading) return;
     if (!file) {
       setStatus("Add an image first.");
       setStatusError(true);

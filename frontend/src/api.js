@@ -298,12 +298,21 @@ export async function startJob({
   signal,
   onStatus,
   attempts = 3,
+  clientKey,
 }) {
+  // One key for this tap — retries must not create extra queue entries.
+  const idem =
+    clientKey ||
+    (globalThis.crypto?.randomUUID
+      ? crypto.randomUUID()
+      : `ck_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 12)}`);
+
   const buildBody = () => {
     const body = new FormData();
     body.append("mode", mode);
     body.append("prompt", prompt);
     body.append("image", file, file.name || "input.png");
+    body.append("client_key", idem);
     if (negative) body.append("negative", negative);
     if (seed != null && seed !== "") body.append("seed", String(seed));
     if (mode === "vid" && videoSeconds != null && videoSeconds !== "") {
@@ -336,7 +345,7 @@ export async function startJob({
       if (i < attempts - 1) {
         onStatus?.({
           status: "queued",
-          message: "GPU blip — retrying…",
+          message: dataDedupRetryMessage(i),
         });
         await sleep(1500 + i * 1000, signal);
       }
@@ -347,6 +356,12 @@ export async function startJob({
       ? friendlyNetworkMessage(lastErr, "start")
       : String(lastErr?.message || lastErr || "Failed to start job")
   );
+}
+
+function dataDedupRetryMessage(attemptIndex) {
+  return attemptIndex === 0
+    ? "Connection blip — checking the same job again…"
+    : "Still reconnecting — reusing this generate tap…";
 }
 
 export async function getJob(jobId) {

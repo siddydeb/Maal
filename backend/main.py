@@ -485,15 +485,32 @@ async def start_job(
     video_seconds: Optional[str] = Form(None),
     preset_id: Optional[str] = Form(None),
     test_run: Optional[str] = Form(None),
+    client_key: Optional[str] = Form(None),
     owner: str = Depends(require_owner),
 ):
     """
     Start generation as a background job. Returns immediately with job id.
     Poll GET /api/jobs/{id} — survives phone sleep / app switch / fetch abort.
+
+    Optional client_key: idempotency token so mobile/network retries of the same
+    tap do not enqueue duplicate jobs.
     """
     prompt = (prompt or "").strip()
     if not prompt:
         raise HTTPException(400, "Prompt is required")
+
+    idem = db.normalize_client_key(client_key)
+    if idem:
+        existing = await db.find_job_by_client_key(owner, idem)
+        if existing:
+            return _json(
+                {
+                    "id": existing["id"],
+                    "status": existing.get("status") or "queued",
+                    "mode": existing.get("mode") or mode,
+                    "deduped": True,
+                }
+            )
 
     from backend.prompt_fix import normalize_prompt
 
@@ -525,6 +542,19 @@ async def start_job(
             f"and set COMFYUI_URL (current: {settings.comfyui_url}).",
         )
 
+    # Re-check after the slow health/upload path in case a twin request landed.
+    if idem:
+        existing = await db.find_job_by_client_key(owner, idem)
+        if existing:
+            return _json(
+                {
+                    "id": existing["id"],
+                    "status": existing.get("status") or "queued",
+                    "mode": existing.get("mode") or mode,
+                    "deduped": True,
+                }
+            )
+
     job = await db.create_job(
         mode=mode,
         prompt=prompt,
@@ -536,6 +566,7 @@ async def start_job(
         video_seconds=vid_sec,
         preset_id=preset,
         test_run=is_test,
+        client_key=idem,
     )
     jid = job["id"]
 

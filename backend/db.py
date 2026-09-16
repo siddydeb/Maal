@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Any, Optional
-
+import re
 import threading
 
 from bson import ObjectId
@@ -556,6 +556,30 @@ async def delete_generation(gen_id: str, *, owner: Optional[str] = None) -> bool
 
 # --- Async generation jobs (survive client disconnect / phone sleep) ---
 
+_CLIENT_KEY_RE = re.compile(r"^[A-Za-z0-9_-]{8,80}$")
+
+
+def normalize_client_key(raw: Optional[str]) -> Optional[str]:
+    """Stable client idempotency key for POST /api/jobs retries."""
+    key = str(raw or "").strip()
+    if not key or not _CLIENT_KEY_RE.match(key):
+        return None
+    return key
+
+
+async def find_job_by_client_key(
+    owner: str, client_key: str
+) -> Optional[dict[str, Any]]:
+    """Return an existing job for this owner+client_key (retry / reload dedupe)."""
+    if not owner or not client_key:
+        return None
+    doc = await db().jobs.find_one(
+        {"owner": owner, "client_key": client_key},
+        sort=[("created_at", -1)],
+    )
+    return _serialize_job(doc) if doc else None
+
+
 async def create_job(
     *,
     mode: str,
@@ -568,6 +592,7 @@ async def create_job(
     video_seconds: Optional[float] = None,
     preset_id: Optional[str] = None,
     test_run: bool = False,
+    client_key: Optional[str] = None,
 ) -> dict[str, Any]:
     import io
     import uuid as _uuid
@@ -592,6 +617,7 @@ async def create_job(
         "input_gridfs_id": input_gridfs_id,
         "preset_id": preset_id,
         "test_run": bool(test_run),
+        "client_key": client_key,
         "error": None,
         "result": None,
         "created_at": now,
