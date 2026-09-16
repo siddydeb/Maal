@@ -55,7 +55,7 @@ export const ACTION_PRESETS = [
     hint: "full BJ sequence",
     mode: "vid",
     prompt:
-      "bl0wj0b, PENISLORA, photorealistic video of this exact woman giving a complete blowjob and deepthroat to one man. A man with visible torso and hips appears; exactly one erect penis attached to his body. She takes that penis into her mouth and deepthroats him, then full continuous blowjob head bobbing with deep in-and-out strokes for the whole clip. Keep her exact same face. One continuous shot.",
+      "bl0wj0b, PENISLORA. Photorealistic video of the exact woman in the start image giving a complete blowjob and deepthroat to one man in this same scene: a man with visible torso and hips is with her, exactly one erect penis attached to his body (never floating or detached), she takes that connected penis fully into her mouth and deepthroats him, then keeps giving a full continuous blowjob for the entire clip — lips sealed on the shaft, rhythmic head bobbing, repeated deep in-and-out strokes with visible full-shaft travel again and again, not tip-only and not frozen. Keep her exact same face, hair, expression, clothes, and background; same camera angle and framing; no jumpcut, no kneeling teleport, no pose swap; sharp face every frame; one continuous shot.",
   },
   {
     id: "sex",
