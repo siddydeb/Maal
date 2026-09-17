@@ -22,7 +22,7 @@ class Settings(BaseSettings):
 
     comfyui_url: str = "http://127.0.0.1:8188"
     # Wan oral I2V on 16GB often needs 35–50 min (52 steps, dual LoRA stage).
-    comfyui_timeout_sec: int = 3600
+    comfyui_timeout_sec: int = 7200
     comfyui_dir: Optional[str] = None
 
     zero_residue: bool = True

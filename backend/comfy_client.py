@@ -279,6 +279,7 @@ class ComfyClient:
         loras_high: Optional[list] = None,
         loras_low: Optional[list] = None,
         high_noise_fraction: Optional[float] = None,
+        wait_timeout: Optional[float] = None,
     ) -> tuple[bytes, str]:
         seed = seed if seed is not None else random.randint(0, 2**32 - 1)
         max_w = width or self.settings.video_width
@@ -286,6 +287,9 @@ class ComfyClient:
         image_bytes, out_w, out_h = _prep_edit_image(image_bytes, max_w, max_h)
         image_name = await self._upload_image(image_bytes)
         del image_bytes
+        # Oral Wan I2V routinely exceeds the image default; never wait less than 2h.
+        wait = float(wait_timeout) if wait_timeout is not None else float(self.timeout)
+        wait = max(wait, 7200.0)
         try:
             workflow = build_i2v_prompt(
                 image_name=image_name,
@@ -311,6 +315,7 @@ class ComfyClient:
                 workflow,
                 prefer=("videos", "gifs", "images"),
                 input_name=image_name,
+                wait_timeout=wait,
             )
         except Exception:
             await self._full_scrub(input_name=image_name)
@@ -322,6 +327,24 @@ class ComfyClient:
             r = await client.post(f"{self.base}/interrupt")
             if r.status_code not in (200, 204):
                 raise ComfyUIError(f"Interrupt failed: {r.status_code} {r.text}")
+
+    async def clear_queue(self) -> None:
+        """Interrupt current work and drop pending prompts (orphan cleanup)."""
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            try:
+                await client.post(f"{self.base}/interrupt")
+            except Exception:
+                pass
+            try:
+                await client.post(f"{self.base}/queue", json={"clear": True})
+            except Exception:
+                pass
+            # Second interrupt helps when a sampler ignores the first stop.
+            try:
+                await asyncio.sleep(0.4)
+                await client.post(f"{self.base}/interrupt")
+            except Exception:
+                pass
 
     async def _upload_image(self, image_bytes: bytes) -> str:
         name = f"wan_in_{uuid.uuid4().hex}.png"
@@ -348,14 +371,21 @@ class ComfyClient:
                 raise ComfyUIError(f"Node errors: {data['node_errors']}")
             return data["prompt_id"]
 
-    async def _wait_ws(self, client_id: str, prompt_id: str) -> None:
+    async def _wait_ws(
+        self,
+        client_id: str,
+        prompt_id: str,
+        *,
+        timeout: Optional[float] = None,
+    ) -> None:
         """Wait for Comfy completion via WS, reconnecting through tunnel drops.
 
         Cloudflare tunnels often close long-lived sockets while sampling continues.
         On disconnect we poll /history before opening a new WS.
         """
         uri = f"{self.ws_scheme}://{self.host}/ws?clientId={client_id}"
-        deadline = asyncio.get_event_loop().time() + self.timeout
+        limit = float(timeout) if timeout is not None else float(self.timeout)
+        deadline = asyncio.get_event_loop().time() + max(60.0, limit)
         last_err: Optional[BaseException] = None
 
         while True:
@@ -522,11 +552,12 @@ class ComfyClient:
         workflow: dict[str, Any],
         prefer: tuple[str, ...],
         input_name: str,
+        wait_timeout: Optional[float] = None,
     ) -> tuple[bytes, str]:
         await self.ensure_root()
         client_id = uuid.uuid4().hex
         prompt_id = await self._queue(workflow, client_id)
-        await self._wait_ws(client_id, prompt_id)
+        await self._wait_ws(client_id, prompt_id, timeout=wait_timeout)
         history = await self._history(prompt_id)
         outputs = history.get("outputs") or {}
         descriptors = self._collect_descriptors(outputs)

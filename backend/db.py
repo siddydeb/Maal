@@ -829,10 +829,10 @@ def _job_age_limits(doc: Optional[dict[str, Any]] = None) -> tuple[int, int]:
     """Return (max_age_from_start, max_wall_from_create) in seconds."""
     settings = get_settings()
     max_age = max(120, int(settings.comfyui_timeout_sec) + 120)
-    # Wan oral I2V routinely needs 35–50 min; FE polls must not kill at ~42 min.
+    # Wan oral I2V can run 60–90+ min; FE/stale sweeps must not kill early.
     if (doc or {}).get("mode") == "vid":
-        max_age = max(max_age, 3600)
-    max_wall = max(3600, max_age + 900)
+        max_age = max(max_age, 7200)
+    max_wall = max(7200, max_age + 900)
     return max_age, max_wall
 
 

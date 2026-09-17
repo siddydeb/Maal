@@ -125,6 +125,10 @@ def _spawn_job_thread(job_id: str, coro_factory) -> None:
     Run generation on a dedicated thread + event loop so Render healthz
     stays responsive on the main uvicorn loop (free-plan 5s kill).
     """
+    existing = _job_threads.get(job_id)
+    if existing is not None and existing.is_alive():
+        print(f"[wan] skip spawn; job {job_id} already has a live worker")
+        return
 
     def _target() -> None:
         async def _wrapped() -> None:
@@ -177,6 +181,12 @@ def _cors_origins() -> list[str]:
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     await db.connect()
+    # Drop Comfy orphans from prior API death before reclaim/resume re-queues.
+    try:
+        await _comfy().clear_queue()
+        print("[wan] cleared Comfy queue on startup")
+    except Exception as exc:
+        print(f"[wan] comfy clear on start failed: {exc}")
     try:
         jobs = await db.reclaim_active_jobs_on_startup()
         if jobs:
@@ -822,6 +832,11 @@ async def _resume_persisted_job(job: dict) -> None:
 
     resume_n = int(job.get("resume_count") or 0)
     print(f"[wan] resume job={job_id} mode={mode} attempt={resume_n}")
+    # Avoid stacking a second identical Comfy prompt on top of leftovers.
+    try:
+        await _comfy().clear_queue()
+    except Exception as exc:
+        print(f"[wan] comfy clear before resume failed: {exc}")
     await _run_job(
         job_id=job_id,
         mode=mode,
@@ -861,10 +876,10 @@ async def _run_job(
     )
     settings = get_settings()
     # Hard ceiling so a hung WS/tunnel cannot leave the job "running" forever.
-    # Wan oral I2V often needs 35–45 min; keep video above image timeout.
+    # Wan oral I2V can exceed 60 min; keep video wait aligned with Comfy client (2h).
     hard_limit = max(180, int(settings.comfyui_timeout_sec) + 90)
     if mode == "vid":
-        hard_limit = max(hard_limit, 3600)
+        hard_limit = max(hard_limit, 7200)
     try:
         payload = await asyncio.wait_for(
             _execute_generation(
@@ -889,6 +904,10 @@ async def _run_job(
             finished_at=datetime.now(timezone.utc),
         )
     except asyncio.CancelledError:
+        try:
+            await _comfy().clear_queue()
+        except Exception:
+            pass
         db.finish_job_if_active_sync(
             job_id,
             status="cancelled",
@@ -897,6 +916,10 @@ async def _run_job(
         )
         raise
     except asyncio.TimeoutError:
+        try:
+            await _comfy().clear_queue()
+        except Exception:
+            pass
         db.finish_job_if_active_sync(
             job_id,
             status="failed",
