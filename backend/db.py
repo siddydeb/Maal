@@ -70,7 +70,12 @@ def finish_job_if_active_sync(
         }
     else:
         status_filter = {"status": {"$in": ["queued", "running"]}}
-    _sync_jobs().update_one({"_id": oid, **status_filter}, {"$set": fields})
+    result = _sync_jobs().update_one({"_id": oid, **status_filter}, {"$set": fields})
+    if result.matched_count == 0:
+        print(
+            f"[wan] finish_job_if_active_sync: job={job_id} status={status} "
+            "DROPPED (already finalized)"
+        )
     if status in ("done", "failed", "cancelled"):
         # Best-effort wipe of start image (async GridFS path may not be available here).
         try:
@@ -799,7 +804,12 @@ async def finish_job_if_active(
         }
     else:
         filt = {"_id": oid, "status": {"$in": ["queued", "running"]}}
-    await db().jobs.update_one(filt, {"$set": fields})
+    result = await db().jobs.update_one(filt, {"$set": fields})
+    if result.matched_count == 0:
+        print(
+            f"[wan] finish_job_if_active: job={job_id} status={status} "
+            "DROPPED (already finalized)"
+        )
     doc = await db().jobs.find_one({"_id": oid})
     if doc and status in ("done", "failed"):
         await delete_job_input(job_id)
