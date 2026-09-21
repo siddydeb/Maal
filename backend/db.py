@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 import re
 import threading
@@ -684,6 +684,8 @@ async def delete_job_input(job_id: str) -> None:
 async def list_active_jobs(
     *, owner: Optional[str] = None, limit: int = 30
 ) -> list[dict[str, Any]]:
+    """Queued/running jobs, plus recent failures so they don't silently vanish."""
+    limit = min(max(1, int(limit)), 100)
     query: dict[str, Any] = {"status": {"$in": ["queued", "running"]}}
     if owner:
         query["owner"] = owner
@@ -691,13 +693,37 @@ async def list_active_jobs(
         db()
         .jobs.find(query)
         .sort("created_at", -1)
-        .limit(min(max(1, int(limit)), 100))
+        .limit(limit)
     )
     out: list[dict[str, Any]] = []
+    seen: set[str] = set()
     async for doc in cursor:
         doc = await _maybe_fail_stale_job(doc)
         if doc.get("status") in ("queued", "running"):
+            sid = str(doc.get("_id") or doc.get("id") or "")
+            seen.add(sid)
             out.append(_serialize_job(doc))
+
+    # Keep failed/cancelled visible briefly so Ongoing doesn't look abandoned.
+    recent_cut = datetime.now(timezone.utc) - timedelta(minutes=45)
+    recent_q: dict[str, Any] = {
+        "status": {"$in": ["failed", "cancelled"]},
+        "finished_at": {"$gte": recent_cut},
+    }
+    if owner:
+        recent_q["owner"] = owner
+    recent = (
+        db()
+        .jobs.find(recent_q)
+        .sort("finished_at", -1)
+        .limit(min(12, limit))
+    )
+    async for doc in recent:
+        sid = str(doc.get("_id") or "")
+        if sid in seen:
+            continue
+        seen.add(sid)
+        out.append(_serialize_job(doc))
     return out
 
 

@@ -1620,7 +1620,8 @@ export default function App() {
               </button>
             </div>
             <p className="ongoing-note">
-              Live jobs on the server. Cancel frees the GPU for the next one.
+              Live jobs on the server. Recent failures stay here briefly with the
+              error so nothing vanishes silently. Cancel frees the GPU for the next one.
             </p>
             <ul className="ongoing-list">
               {!ongoing.length && (
@@ -1628,6 +1629,8 @@ export default function App() {
               )}
               {ongoing.map((job) => {
                 const elapsed = formatElapsed(job.started_at || job.created_at);
+                const terminal =
+                  job.status === "failed" || job.status === "cancelled";
                 return (
                   <li key={job.id} className="ongoing-card">
                     <div className="ongoing-main">
@@ -1645,15 +1648,20 @@ export default function App() {
                       {job.mode === "vid" && job.video_seconds != null && (
                         <p className="ongoing-meta">{job.video_seconds}s video</p>
                       )}
+                      {terminal && job.error && (
+                        <p className="ongoing-error">{String(job.error).slice(0, 280)}</p>
+                      )}
                     </div>
-                    <button
-                      type="button"
-                      className="ongoing-cancel"
-                      disabled={busyId === job.id}
-                      onClick={() => onCancelJob(job)}
-                    >
-                      {busyId === job.id ? "…" : "Cancel"}
-                    </button>
+                    {!terminal && (
+                      <button
+                        type="button"
+                        className="ongoing-cancel"
+                        disabled={busyId === job.id}
+                        onClick={() => onCancelJob(job)}
+                      >
+                        {busyId === job.id ? "…" : "Cancel"}
+                      </button>
+                    )}
                   </li>
                 );
               })}

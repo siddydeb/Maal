@@ -933,6 +933,16 @@ textarea:focus {
   background: rgba(126, 200, 255, 0.12);
 }
 
+.ongoing-status.st-failed {
+  color: #ff8a7a;
+  background: rgba(255, 107, 91, 0.14);
+}
+
+.ongoing-status.st-cancelled {
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.06);
+}
+
 .ongoing-time {
   margin-left: auto;
   font-size: 0.75rem;
@@ -950,6 +960,15 @@ textarea:focus {
   margin: 0.3rem 0 0;
   font-size: 0.72rem;
   color: var(--muted);
+}
+
+.ongoing-error {
+  margin: 0.35rem 0 0;
+  font-size: 0.78rem;
+  line-height: 1.35;
+  color: #ff8a7a;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .ongoing-cancel {
