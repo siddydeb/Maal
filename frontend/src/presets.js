@@ -66,6 +66,14 @@ export const ACTION_PRESETS = [
       "Photorealistic video of the exact woman in the start image: her breasts bounce, shake, jiggle and sway continuously for the whole clip — clear soft heavy bounce under the same clothes, natural physics, not frozen and not a tiny micro-wiggle. Keep her exact same face, hair, expression, clothes, body proportions, and background; same camera angle and framing; no jumpcut, no pose swap, no outfit change; sharp face every frame; one continuous shot.",
   },
   {
+    id: "twerk",
+    label: "Twerk",
+    hint: "ass shake · clothed",
+    mode: "vid",
+    prompt:
+      "Photorealistic video of the exact woman in the start image: twerking and ass shaking — twerks causing her ass to jiggle and shake continuously for the whole clip, clear heavy booty bounce under the same clothes, natural physics, not frozen. Keep her exact same face, hair, expression, clothes, body proportions, and background; same camera angle and framing; no jumpcut, no pose swap, no outfit change; sharp face every frame; one continuous shot.",
+  },
+  {
     id: "sex",
     label: "Sex",
     hint: "missionary",
