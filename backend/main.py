@@ -102,10 +102,13 @@ _background_jobs: set[asyncio.Task] = set()
 _job_tasks: dict[str, asyncio.Task] = {}
 _job_threads: dict[str, threading.Thread] = {}
 
-# Comfy only has one GPU, so running more than one job's worth of image/video
-# buffers in memory at once buys no throughput and is what blew past Render's
-# free-plan 512MB limit (worst on restart, when every resumed job fired at once).
+# Comfy only has one GPU — FCFS dispatcher runs exactly one job at a time.
+# Semaphore is a belt-and-suspenders guard if two workers ever race.
 _JOB_SLOT = threading.Semaphore(1)
+_dispatcher_lock = threading.Lock()
+_dispatcher_wake = threading.Event()
+_dispatcher_thread: Optional[threading.Thread] = None
+_active_worker_job_id: Optional[str] = None
 
 
 def _track_job_task(job_id: str, task: asyncio.Task) -> None:
@@ -131,6 +134,8 @@ def _spawn_job_thread(job_id: str, coro_factory) -> None:
         return
 
     def _target() -> None:
+        global _active_worker_job_id
+
         async def _wrapped() -> None:
             # Motor must bind to this thread's loop (not the main API loop).
             await db.connect()
@@ -155,11 +160,79 @@ def _spawn_job_thread(job_id: str, coro_factory) -> None:
                 pass
         finally:
             _job_threads.pop(job_id, None)
+            with _dispatcher_lock:
+                if _active_worker_job_id == job_id:
+                    _active_worker_job_id = None
             _JOB_SLOT.release()
+            # Pull the next FCFS job (if any).
+            _kick_job_dispatcher()
 
     t = threading.Thread(target=_target, name=f"wan-job-{job_id[:8]}", daemon=True)
     _job_threads[job_id] = t
     t.start()
+
+
+def _kick_job_dispatcher() -> None:
+    """Wake the single FCFS dispatcher (create it on first use)."""
+    global _dispatcher_thread
+    with _dispatcher_lock:
+        if _dispatcher_thread is None or not _dispatcher_thread.is_alive():
+            _dispatcher_thread = threading.Thread(
+                target=_dispatcher_loop,
+                name="wan-fcfs-dispatcher",
+                daemon=True,
+            )
+            _dispatcher_thread.start()
+        _dispatcher_wake.set()
+
+
+def _dispatcher_loop() -> None:
+    while True:
+        _dispatcher_wake.wait(timeout=5.0)
+        _dispatcher_wake.clear()
+        try:
+            _dispatcher_tick()
+        except Exception as exc:
+            print(f"[wan] FCFS dispatcher tick failed: {exc}")
+
+
+def _dispatcher_tick() -> None:
+    """Start at most one queued job (oldest first). Load payload from GridFS."""
+    global _active_worker_job_id
+
+    with _dispatcher_lock:
+        cur = _active_worker_job_id
+        if cur:
+            t = _job_threads.get(cur)
+            if t is not None and t.is_alive():
+                return
+            _active_worker_job_id = None
+
+    nxt = db.peek_next_queued_job_sync()
+    if not nxt:
+        return
+    jid = nxt["id"]
+
+    with _dispatcher_lock:
+        cur = _active_worker_job_id
+        if cur:
+            t = _job_threads.get(cur)
+            if t is not None and t.is_alive():
+                return
+        _active_worker_job_id = jid
+
+    def _factory(job_id=jid):
+        async def _coro():
+            job = await db.get_job(job_id)
+            if not job or job.get("status") != "queued":
+                print(f"[wan] FCFS skip job={job_id} status={job and job.get('status')}")
+                return
+            await _resume_persisted_job(job)
+
+        return _coro
+
+    print(f"[wan] FCFS start job={jid}")
+    _spawn_job_thread(jid, _factory())
 
 
 def _json(data: object, status: int = 200) -> Response:
@@ -190,17 +263,11 @@ async def lifespan(_app: FastAPI):
     try:
         jobs = await db.reclaim_active_jobs_on_startup()
         if jobs:
-            print(f"[wan] resuming {len(jobs)} job(s) after worker start")
-            for job in jobs:
-                jid = job["id"]
-
-                def _factory(j=job):
-                    async def _coro():
-                        await _resume_persisted_job(j)
-
-                    return _coro
-
-                _spawn_job_thread(jid, _factory())
+            print(
+                f"[wan] re-queued {len(jobs)} job(s) after worker start "
+                "(FCFS dispatcher will run one at a time)"
+            )
+        _kick_job_dispatcher()
     except Exception as exc:
         print(f"[wan] job resume on startup failed: {exc}")
     settings = get_settings()
@@ -578,41 +645,19 @@ async def start_job(
         test_run=is_test,
         client_key=idem,
     )
-    jid = job["id"]
-
-    def _factory(
-        job_id=jid,
-        mode=mode,
-        prompt=prompt,
-        prompt_en=prompt_en,
-        image_bytes=image_bytes,
-        negative=negative,
-        seed=seed,
-        resolved=resolved,
-        vid_sec=vid_sec,
-        owner=owner,
-        preset=preset,
-        is_test=is_test,
-    ):
-        async def _coro():
-            await _run_job(
-                job_id=job_id,
-                mode=mode,
-                prompt=prompt,
-                prompt_en=prompt_en,
-                image_bytes=image_bytes,
-                negative=negative,
-                seed=seed,
-                resolved=resolved,
-                video_seconds=vid_sec,
-                owner=owner,
-                extra_meta={"preset_id": preset, "test_run": is_test},
-            )
-
-        return _coro
-
-    _spawn_job_thread(jid, _factory())
-    return _json({"id": job["id"], "status": "queued", "mode": mode})
+    # Persist only — FCFS dispatcher loads from GridFS and runs one at a time.
+    # Do not hold image_bytes in a waiting thread (Render RAM).
+    del image_bytes
+    _kick_job_dispatcher()
+    return _json(
+        {
+            "id": job["id"],
+            "status": "queued",
+            "mode": mode,
+            "queue_position": job.get("queue_position"),
+            "input_thumb_url": job.get("input_thumb_url"),
+        }
+    )
 
 
 @app.get("/api/jobs")
@@ -630,6 +675,33 @@ async def list_jobs(
     return _json({"items": items, "total": len(items)})
 
 
+@app.post("/api/jobs/clear-queue")
+async def clear_queue(owner: str = Depends(require_owner)):
+    """
+    Empty the owner's queue: cancel every queued job and the running one.
+    Use after a crash / stuck GPU so you can start clean.
+    """
+    global _active_worker_job_id
+    with _dispatcher_lock:
+        active = _active_worker_job_id
+    result = await db.cancel_all_active_jobs(owner=owner, include_running=True)
+    # If we cancelled the GPU job, interrupt Comfy once.
+    if active and active in (result.get("ids") or []):
+        try:
+            await _comfy().interrupt()
+        except Exception:
+            pass
+        try:
+            await _comfy().clear_queue()
+        except Exception:
+            pass
+    with _dispatcher_lock:
+        if _active_worker_job_id and _active_worker_job_id in (result.get("ids") or []):
+            _active_worker_job_id = None
+    _kick_job_dispatcher()
+    return _json({"ok": True, **result})
+
+
 @app.post("/api/jobs/{job_id}/cancel")
 async def cancel_job(job_id: str, owner: str = Depends(require_owner)):
     job = await db.get_job(job_id, owner=owner)
@@ -638,6 +710,7 @@ async def cancel_job(job_id: str, owner: str = Depends(require_owner)):
     if job.get("status") not in ("queued", "running"):
         return _json(job)
 
+    was_running = job.get("status") == "running"
     updated = await db.finish_job_if_active(
         job_id,
         status="cancelled",
@@ -647,11 +720,19 @@ async def cancel_job(job_id: str, owner: str = Depends(require_owner)):
     task = _job_tasks.get(job_id)
     if task and not task.done():
         task.cancel()
-    # Stop GPU work if this (or a sibling) prompt is on Comfy right now
-    try:
-        await _comfy().interrupt()
-    except Exception:
-        pass
+
+    # Only interrupt Comfy when THIS job is the one on the GPU.
+    # Cancelling a queued job must not kill the currently running generation.
+    if was_running:
+        with _dispatcher_lock:
+            active = _active_worker_job_id
+        if active == job_id:
+            try:
+                await _comfy().interrupt()
+            except Exception:
+                pass
+        # Free the slot so the dispatcher can start the next queued job.
+        _kick_job_dispatcher()
     return _json(updated or job)
 
 
@@ -661,6 +742,31 @@ async def job_status(job_id: str, owner: str = Depends(require_owner)):
     if not job:
         raise HTTPException(404, "Job not found")
     return _json(job)
+
+
+@app.get("/api/jobs/{job_id}/input-thumb")
+async def job_input_thumb(
+    job_id: str,
+    w: int = Query(240, ge=64, le=640),
+    owner: str = Depends(require_owner),
+):
+    """JPEG preview of the job's start image (for queue thumbnails)."""
+    job = await db.get_job(job_id, owner=owner)
+    if not job:
+        raise HTTPException(404, "Job not found")
+    raw = await db.get_job_input_bytes(job_id)
+    if not raw:
+        raise HTTPException(404, "No start image for this job")
+    max_w = int(w)
+    img = Image.open(io.BytesIO(raw)).convert("RGB")
+    img.thumbnail((max_w, max_w * 2), Image.Resampling.LANCZOS)
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=72, optimize=True)
+    headers = {
+        **NO_STORE,
+        "Content-Disposition": f'inline; filename="{job_id}_input.jpg"',
+    }
+    return StreamingResponse(io.BytesIO(buf.getvalue()), media_type="image/jpeg", headers=headers)
 
 
 async def _execute_generation(
@@ -869,11 +975,10 @@ async def _run_job(
     owner: Optional[str] = None,
     extra_meta: Optional[dict] = None,
 ) -> None:
-    db.update_job_sync(
-        job_id,
-        status="running",
-        started_at=datetime.now(timezone.utc),
-    )
+    # Claim must succeed — if cancel already finalized, do not touch Comfy.
+    if not db.try_mark_job_running_sync(job_id):
+        print(f"[wan] _run_job abort job={job_id} (not active / cancelled)")
+        return
     settings = get_settings()
     # Hard ceiling so a hung WS/tunnel cannot leave the job "running" forever.
     # Wan oral I2V can exceed 60 min; keep video wait aligned with Comfy client (2h).
@@ -881,6 +986,10 @@ async def _run_job(
     if mode == "vid":
         hard_limit = max(hard_limit, 7200)
     try:
+        # Bail early if cancelled between claim and Comfy submit.
+        if not db.job_is_active_sync(job_id):
+            print(f"[wan] _run_job abort pre-exec job={job_id}")
+            return
         payload = await asyncio.wait_for(
             _execute_generation(
                 mode=mode,
@@ -896,6 +1005,9 @@ async def _run_job(
             ),
             timeout=hard_limit,
         )
+        if not db.job_is_active_sync(job_id):
+            print(f"[wan] _run_job drop done job={job_id} (cancelled mid-run)")
+            return
         db.finish_job_if_active_sync(
             job_id,
             status="done",
@@ -905,7 +1017,7 @@ async def _run_job(
         )
     except asyncio.CancelledError:
         try:
-            await _comfy().clear_queue()
+            await _comfy().interrupt()
         except Exception:
             pass
         db.finish_job_if_active_sync(
@@ -916,6 +1028,10 @@ async def _run_job(
         )
         raise
     except asyncio.TimeoutError:
+        try:
+            await _comfy().interrupt()
+        except Exception:
+            pass
         try:
             await _comfy().clear_queue()
         except Exception:

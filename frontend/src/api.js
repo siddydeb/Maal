@@ -393,6 +393,28 @@ export async function cancelJob(jobId) {
   return readJson(res);
 }
 
+/** Cancel every queued + running job for this account (empty the FCFS queue). */
+export async function clearJobQueue() {
+  const res = await fetch(url("/api/jobs/clear-queue"), {
+    method: "POST",
+    headers: authHeaders(),
+  });
+  return readJson(res);
+}
+
+/** Start-image thumbnail for a queued/running job. */
+export function jobInputThumbUrl(jobOrId) {
+  if (!jobOrId) return "";
+  if (typeof jobOrId !== "string" && jobOrId.input_thumb_url) {
+    const m = String(jobOrId.input_thumb_url);
+    const abs = m.startsWith("http") ? m : url(m);
+    return withAuthQuery(abs);
+  }
+  const id = typeof jobOrId === "string" ? jobOrId : jobOrId.id;
+  if (!id) return "";
+  return url(withAuthQuery(`/api/jobs/${id}/input-thumb?w=240`));
+}
+
 const JOB_STORAGE_KEY = "wan_active_job_v2";
 
 function jobStorageKey() {

@@ -34,13 +34,55 @@ def _sync_jobs():
     return _sync_db()["jobs"]
 
 
-def update_job_sync(job_id: str, **fields: Any) -> None:
+def update_job_sync(job_id: str, **fields: Any) -> bool:
+    """Apply fields. Returns False if a running claim was dropped (already terminal)."""
     try:
         oid = ObjectId(job_id)
     except Exception:
-        return
-    fields["updated_at"] = datetime.now(timezone.utc)
+        return False
+    fields = {**fields, "updated_at": datetime.now(timezone.utc)}
+    # Never resurrect a cancelled/failed/done job (cancel races with worker start).
+    if fields.get("status") == "running":
+        result = _sync_jobs().update_one(
+            {"_id": oid, "status": {"$in": ["queued", "running"]}},
+            {"$set": fields},
+        )
+        if result.matched_count == 0:
+            print(
+                f"[wan] update_job_sync: job={job_id} running DROPPED "
+                "(already finalized)"
+            )
+            return False
+        return True
     _sync_jobs().update_one({"_id": oid}, {"$set": fields})
+    return True
+
+
+def try_mark_job_running_sync(job_id: str) -> bool:
+    """Atomically claim queued → running. False if cancelled/already terminal."""
+    return update_job_sync(
+        job_id,
+        status="running",
+        started_at=datetime.now(timezone.utc),
+    )
+
+
+def peek_next_queued_job_sync() -> Optional[dict[str, Any]]:
+    """FCFS: oldest queued job that still has a start image."""
+    doc = _sync_jobs().find_one(
+        {"status": "queued", "input_gridfs_id": {"$ne": None}},
+        sort=[("created_at", 1)],
+    )
+    return _serialize_job(doc) if doc else None
+
+
+def job_is_active_sync(job_id: str) -> bool:
+    try:
+        oid = ObjectId(job_id)
+    except Exception:
+        return False
+    doc = _sync_jobs().find_one({"_id": oid}, {"status": 1})
+    return bool(doc and doc.get("status") in ("queued", "running"))
 
 
 def finish_job_if_active_sync(
@@ -642,7 +684,18 @@ async def create_job(
     }
     res = await db().jobs.insert_one(doc)
     doc["_id"] = res.inserted_id
-    return _serialize_job(doc)
+    ser = _serialize_job(doc)
+    try:
+        older = await db().jobs.count_documents(
+            {
+                "status": "queued",
+                "created_at": {"$lt": now},
+            }
+        )
+        ser["queue_position"] = int(older) + 1
+    except Exception:
+        ser["queue_position"] = None
+    return ser
 
 
 async def get_job_input_bytes(job_id: str) -> Optional[bytes]:
@@ -684,25 +737,33 @@ async def delete_job_input(job_id: str) -> None:
 async def list_active_jobs(
     *, owner: Optional[str] = None, limit: int = 30
 ) -> list[dict[str, Any]]:
-    """Queued/running jobs, plus recent failures so they don't silently vanish."""
+    """Queued/running jobs in FCFS order, plus recent failures so they don't vanish."""
     limit = min(max(1, int(limit)), 100)
     query: dict[str, Any] = {"status": {"$in": ["queued", "running"]}}
     if owner:
         query["owner"] = owner
+    # FCFS: oldest first (running first among equals via status, then created_at)
     cursor = (
         db()
         .jobs.find(query)
-        .sort("created_at", -1)
+        .sort([("status", -1), ("created_at", 1)])
         .limit(limit)
     )
     out: list[dict[str, Any]] = []
     seen: set[str] = set()
+    queue_pos = 0
     async for doc in cursor:
         doc = await _maybe_fail_stale_job(doc)
         if doc.get("status") in ("queued", "running"):
             sid = str(doc.get("_id") or doc.get("id") or "")
             seen.add(sid)
-            out.append(_serialize_job(doc))
+            ser = _serialize_job(doc)
+            if doc.get("status") == "running":
+                ser["queue_position"] = 0
+            else:
+                queue_pos += 1
+                ser["queue_position"] = queue_pos
+            out.append(ser)
 
     # Keep failed/cancelled visible briefly so Ongoing doesn't look abandoned.
     recent_cut = datetime.now(timezone.utc) - timedelta(minutes=45)
@@ -723,9 +784,36 @@ async def list_active_jobs(
         if sid in seen:
             continue
         seen.add(sid)
-        out.append(_serialize_job(doc))
+        ser = _serialize_job(doc)
+        ser["queue_position"] = None
+        out.append(ser)
     return out
 
+
+async def cancel_all_active_jobs(
+    *,
+    owner: str,
+    include_running: bool = True,
+) -> dict[str, Any]:
+    """Clear the owner's queue (queued, and optionally the running job)."""
+    now = datetime.now(timezone.utc)
+    statuses = ["queued", "running"] if include_running else ["queued"]
+    filt = {"owner": owner, "status": {"$in": statuses}}
+    ids: list[str] = []
+    async for doc in db().jobs.find(filt, {"_id": 1}):
+        ids.append(str(doc["_id"]))
+    cancelled = 0
+    for jid in ids:
+        updated = await finish_job_if_active(
+            jid,
+            status="cancelled",
+            error="Queue cleared.",
+            finished_at=now,
+        )
+        if updated and updated.get("status") == "cancelled":
+            cancelled += 1
+            await delete_job_input(jid)
+    return {"cancelled": cancelled, "ids": ids}
 
 async def list_recent_jobs(
     *, owner: Optional[str] = None, limit: int = 30
@@ -837,7 +925,7 @@ async def finish_job_if_active(
             "DROPPED (already finalized)"
         )
     doc = await db().jobs.find_one({"_id": oid})
-    if doc and status in ("done", "failed"):
+    if doc and status in ("done", "failed", "cancelled"):
         await delete_job_input(job_id)
         doc = await db().jobs.find_one({"_id": oid}) or doc
     return _serialize_job(doc) if doc else None
@@ -872,19 +960,26 @@ def _as_utc(dt: Any) -> Optional[datetime]:
 
 async def reclaim_active_jobs_on_startup() -> list[dict[str, Any]]:
     """
-    After a worker restart, resume jobs that still have a persisted start image.
-    Legacy jobs without input_gridfs_id cannot be resumed and are failed.
+    After a worker restart, re-queue jobs that still have a persisted start image.
+    FCFS dispatcher will start exactly one at a time. Legacy jobs without
+    input_gridfs_id cannot be resumed and are failed.
     """
     now = datetime.now(timezone.utc)
-    max_age, max_wall = _job_age_limits()
     reclaimable: list[dict[str, Any]] = []
 
-    cursor = db().jobs.find({"status": {"$in": ["queued", "running"]}})
+    cursor = db().jobs.find({"status": {"$in": ["queued", "running"]}}).sort(
+        "created_at", 1
+    )
     async for doc in cursor:
         oid = doc["_id"]
         max_age, max_wall = _job_age_limits(doc)
         created = _as_utc(doc.get("created_at"))
-        if created is not None and (now - created).total_seconds() >= max_wall:
+        started = _as_utc(doc.get("started_at"))
+        was_running = doc.get("status") == "running"
+
+        # Absolute abandon (queued can wait longer than a single Comfy run).
+        wall_limit = max(max_wall, 86400) if not was_running else max_wall
+        if created is not None and (now - created).total_seconds() >= wall_limit:
             await db().jobs.update_one(
                 {"_id": oid, "status": {"$in": ["queued", "running"]}},
                 {
@@ -899,10 +994,9 @@ async def reclaim_active_jobs_on_startup() -> list[dict[str, Any]]:
             await delete_job_input(str(oid))
             continue
 
-        anchor = _as_utc(doc.get("started_at")) or created
-        if anchor is not None:
-            age = (now - anchor).total_seconds()
-            if age >= max_age:
+        # Only apply GPU timeout to jobs that were actually running.
+        if was_running and started is not None:
+            if (now - started).total_seconds() >= max_age:
                 await db().jobs.update_one(
                     {"_id": oid, "status": {"$in": ["queued", "running"]}},
                     {
@@ -975,13 +1069,37 @@ async def fail_active_jobs_on_startup() -> int:
 
 
 async def _maybe_fail_stale_job(doc: dict[str, Any]) -> dict[str, Any]:
-    """If a job has been queued/running longer than the Comfy timeout, fail it."""
+    """Fail stuck running jobs; queued jobs may wait in FCFS without GPU timeout."""
     status = doc.get("status")
     if status not in ("queued", "running"):
         return doc
     max_age, max_wall = _job_age_limits(doc)
     now = datetime.now(timezone.utc)
     created = _as_utc(doc.get("created_at"))
+
+    # Queued = waiting for the single GPU slot. Only abandon after a long wall clock.
+    if status == "queued":
+        max_queue_wait = max(max_wall, 86400)  # at least 24h in queue
+        if created is not None and (now - created).total_seconds() >= max_queue_wait:
+            await db().jobs.update_one(
+                {"_id": doc["_id"], "status": "queued"},
+                {
+                    "$set": {
+                        "status": "failed",
+                        "error": (
+                            "Job sat in queue too long and was dropped. "
+                            "Clear the queue or try again."
+                        ),
+                        "finished_at": now,
+                        "updated_at": now,
+                    }
+                },
+            )
+            await delete_job_input(str(doc["_id"]))
+            refreshed = await db().jobs.find_one({"_id": doc["_id"]})
+            return _serialize_job(refreshed) if refreshed else doc
+        return doc
+
     if created is not None and (now - created).total_seconds() >= max_wall:
         await db().jobs.update_one(
             {"_id": doc["_id"], "status": {"$in": ["queued", "running"]}},
@@ -1025,11 +1143,15 @@ def _serialize_job(doc: dict[str, Any]) -> dict[str, Any]:
         if key in out and hasattr(out[key], "isoformat"):
             out[key] = _as_utc(out[key]).isoformat()
     # Never leak GridFS ObjectIds oddly; stringify if present
+    jid = out.get("id")
     if "input_gridfs_id" in out and out["input_gridfs_id"] is not None:
         out["input_gridfs_id"] = str(out["input_gridfs_id"])
         out["resumable"] = True
+        if jid:
+            out["input_thumb_url"] = f"/api/jobs/{jid}/input-thumb?w=240"
     else:
         out["resumable"] = False
+        out["input_thumb_url"] = None
     return out
 
 

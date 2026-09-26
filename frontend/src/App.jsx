@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   cancelJob,
+  clearJobQueue,
   deleteGeneration,
   downloadGeneration,
   ensureNotificationPermission,
@@ -9,6 +10,7 @@ import {
   getHealth,
   getJob,
   getOpsCapabilities,
+  jobInputThumbUrl,
   listActiveJobs,
   listGenerations,
   loadActiveJobId,
@@ -19,6 +21,7 @@ import {
   opsSetTunnel,
   thumbUrl,
   saveActiveJobId,
+  startJob,
   waitForApiHealth,
   waitForJob,
   updateGeneration,
@@ -799,9 +802,12 @@ export default function App() {
 
   async function onCancelJob(job) {
     if (!job?.id) return;
+    const isQueued = job.status === "queued";
     if (
       !window.confirm(
-        "Cancel this generation?\n\nIt will stop on the server/GPU if still running."
+        isQueued
+          ? "Remove this job from the queue?\n\nOther jobs keep running normally."
+          : "Cancel this running generation?\n\nIt will stop on the GPU. Queued jobs continue after."
       )
     ) {
       return;
@@ -814,7 +820,33 @@ export default function App() {
         setLoading(false);
       }
       await refreshOngoing();
-      setStatus("Job cancelled.");
+      setStatus(isQueued ? "Removed from queue." : "Job cancelled.");
+      setStatusError(false);
+    } catch (err) {
+      const s = statusFromErr(err);
+      setStatus(s.text);
+      setStatusError(s.error);
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function onClearQueue() {
+    if (
+      !window.confirm(
+        "Clear the full queue?\n\nCancels every queued job and the one running now. Use this if something is stuck after a crash."
+      )
+    ) {
+      return;
+    }
+    setBusyId("clear-queue");
+    try {
+      const data = await clearJobQueue();
+      saveActiveJobId(null);
+      setLoading(false);
+      await refreshOngoing();
+      const n = Number(data?.cancelled) || 0;
+      setStatus(n ? `Cleared ${n} job(s) from the queue.` : "Queue was already empty.");
       setStatusError(false);
     } catch (err) {
       const s = statusFromErr(err);
@@ -842,7 +874,6 @@ export default function App() {
     videoSeconds: secs,
     presetId,
   }) {
-    if (loading) return;
     if (!file) {
       setStatus("Add an image first.");
       setStatusError(true);
@@ -855,66 +886,66 @@ export default function App() {
       return;
     }
 
-    pollAbortRef.current?.abort();
-    const ac = new AbortController();
-    pollAbortRef.current = ac;
-
-    setLoading(true);
+    // Enqueue only — FCFS processes one at a time. Keep submitting freely.
     setStatusError(false);
-    setStatus(
-      "Waking API if needed, then starting job… (first request after idle can take up to a minute)"
-    );
-    await ensureNotificationPermission();
-    await requestWakeLock();
-
+    setStatus("Adding to queue…");
+    setBusyId("enqueue");
     try {
-      const data = await generate({
+      const started = await startJob({
         mode: genMode,
         prompt: trimmed,
         file,
         videoSeconds: genMode === "vid" ? secs : undefined,
         presetId: presetId || undefined,
         testRun: tester,
-        signal: ac.signal,
-        onStatus: (j) => {
-          const msg = statusForJob(j);
-          if (msg) setStatus(msg);
-        },
       });
       setLastPresetId(presetId || null);
-      if (tester && presetId) {
-        try {
-          const refData = await listTestRefs(presetId);
-          setResultRefs(Array.isArray(refData.items) ? refData.items : []);
-        } catch {
-          setResultRefs([]);
-        }
-      } else {
-        setResultRefs([]);
+      if (started?.id) saveActiveJobId(started.id, { mode: genMode });
+      await refreshOngoing();
+      const pos = started?.queue_position;
+      const deduped = started?.deduped;
+      setStatus(
+        deduped
+          ? "Same tap — already in the queue."
+          : pos != null && pos > 0
+            ? `Queued (#${pos}). One job runs at a time — check Ongoing.`
+            : "Queued — will run when the GPU is free. Check Ongoing."
+      );
+      setStatusError(false);
+      // Background watch for completion notification (does not block more submits).
+      if (started?.id && !deduped) {
+        waitForJob(started.id, {
+          onStatus: () => {},
+        })
+          .then(async (data) => {
+            if (data?.id) {
+              await ensureNotificationPermission();
+              try {
+                if (typeof Notification !== "undefined" && Notification.permission === "granted") {
+                  new Notification("Generation ready", {
+                    body: (trimmed || "Job").slice(0, 80),
+                  });
+                }
+              } catch {
+                /* ignore */
+              }
+              refreshOngoing();
+              if (loadActiveJobId() === started.id) {
+                setLastPresetId(presetId || null);
+                await finishWithResult(data);
+              }
+            }
+          })
+          .catch(() => {
+            refreshOngoing();
+          });
       }
-      await finishWithResult(data);
-      refreshOngoing();
     } catch (err) {
       const msg = String(err.message || err);
-      if (msg === "Cancelled") {
-        // Refresh / navigation aborted polling — server job keeps running
-        setStatus(
-          "Status updates paused on this screen — generation keeps running on the GPU. Reopen the app or check Library when it’s done."
-        );
-        setStatusError(false);
-        refreshOngoing();
-      } else if (isTransientNetworkError(err) || /Failed to fetch|Load failed|NetworkError/i.test(msg)) {
-        setStatus(friendlyNetworkMessage(err, "poll"));
-        setStatusError(false);
-        refreshOngoing();
-      } else {
-        setStatus(msg);
-        setStatusError(true);
-      }
+      setStatus(msg);
+      setStatusError(true);
     } finally {
-      setLoading(false);
-      await releaseWakeLock();
-      refreshOngoing();
+      setBusyId(null);
     }
   }
 
@@ -1012,20 +1043,17 @@ export default function App() {
     }
   }
 
-  const goLabel = loading
-    ? "Working…"
-    : mode === "vid"
-      ? "Generate video"
-      : "Generate image";
+  const goLabel =
+    mode === "vid" ? "Queue video" : "Queue image";
 
   const measuredEstimate = formatEstimate(
     mode === "vid" ? eta?.vid_sec : eta?.img_sec
   );
   const estimateLabel = measuredEstimate
-    ? `Estimated time: ${measuredEstimate}`
+    ? `Runs one-at-a-time · ~${measuredEstimate} each`
     : mode === "vid"
-      ? "Estimated time: 2–5 min"
-      : "Estimated time: 1–3 min";
+      ? "Runs one-at-a-time · ~2–5 min each"
+      : "Runs one-at-a-time · ~1–3 min each";
 
   const resultIsImage =
     result &&
@@ -1117,9 +1145,15 @@ export default function App() {
         onClick={goOngoing}
       >
         <IconJobs className="tab-ico" />
-        <span>Ongoing Jobs</span>
-        {ongoing.length > 0 && (
-          <span className="nav-count">{ongoing.length}</span>
+        <span>Queue</span>
+        {ongoing.filter((j) => j.status === "queued" || j.status === "running").length >
+          0 && (
+          <span className="nav-count">
+            {
+              ongoing.filter((j) => j.status === "queued" || j.status === "running")
+                .length
+            }
+          </span>
         )}
       </button>
       <button
@@ -1414,7 +1448,7 @@ export default function App() {
                           key={p.id}
                           type="button"
                           className="preset-btn"
-                          disabled={loading}
+                          disabled={busyId === "enqueue"}
                           title={p.hint}
                           onClick={() => onPreset(p.id)}
                         >
@@ -1429,12 +1463,12 @@ export default function App() {
                 <button
                   type="submit"
                   className="go"
-                  disabled={loading || !prompt.trim()}
+                  disabled={busyId === "enqueue" || !prompt.trim()}
                 >
                   <span className="go-main">
                     <IconSpark className="go-ico" />
-                    <span>{goLabel}</span>
-                    {loading && <span className="spinner" />}
+                    <span>{busyId === "enqueue" ? "Queuing…" : goLabel}</span>
+                    {busyId === "enqueue" && <span className="spinner" />}
                   </span>
                   <span className="go-sub">{estimateLabel}</span>
                 </button>
@@ -1614,14 +1648,24 @@ export default function App() {
         {view === "ongoing" && (
           <section className="panel view-panel history">
             <div className="history-head">
-              <h2>Ongoing</h2>
-              <button type="button" className="ghost" onClick={refreshOngoing}>
-                refresh
-              </button>
+              <h2>Queue</h2>
+              <div className="history-head-actions">
+                <button type="button" className="ghost" onClick={refreshOngoing}>
+                  refresh
+                </button>
+                <button
+                  type="button"
+                  className="ghost danger-ghost"
+                  disabled={busyId === "clear-queue" || !ongoing.some((j) => j.status === "queued" || j.status === "running")}
+                  onClick={onClearQueue}
+                >
+                  {busyId === "clear-queue" ? "clearing…" : "Clear queue"}
+                </button>
+              </div>
             </div>
             <p className="ongoing-note">
-              Live jobs on the server. Recent failures stay here briefly with the
-              error so nothing vanishes silently. Cancel frees the GPU for the next one.
+              FCFS queue — submit as many as you want; the GPU runs one at a time.
+              Cancel removes only that job. Clear queue empties everything if something is stuck.
             </p>
             <ul className="ongoing-list">
               {!ongoing.length && (
@@ -1631,11 +1675,30 @@ export default function App() {
                 const elapsed = formatElapsed(job.started_at || job.created_at);
                 const terminal =
                   job.status === "failed" || job.status === "cancelled";
+                const thumb = jobInputThumbUrl(job);
+                const pos =
+                  job.status === "running"
+                    ? "Now"
+                    : job.status === "queued" && job.queue_position != null
+                      ? `#${job.queue_position}`
+                      : null;
                 return (
                   <li key={job.id} className="ongoing-card">
+                    <div className="ongoing-thumb" aria-hidden={!thumb}>
+                      {thumb ? (
+                        <img src={thumb} alt="" loading="lazy" />
+                      ) : (
+                        <span className="ongoing-thumb-ph" />
+                      )}
+                    </div>
                     <div className="ongoing-main">
                       <div className="ongoing-top">
-                        <strong className="ongoing-mode">{job.mode || "—"}</strong>
+                        {pos && (
+                          <span className="ongoing-pos">{pos}</span>
+                        )}
+                        <strong className="ongoing-mode">
+                          {job.preset_id || job.mode || "—"}
+                        </strong>
                         <span className={`ongoing-status st-${job.status}`}>
                           {job.status}
                         </span>
@@ -1979,9 +2042,16 @@ export default function App() {
           onClick={goOngoing}
         >
           <IconJobs className="bottom-ico" />
-          <span>Jobs</span>
-          {ongoing.length > 0 && (
-            <span className="bottom-badge">{ongoing.length}</span>
+          <span>Queue</span>
+          {ongoing.filter((j) => j.status === "queued" || j.status === "running")
+            .length > 0 && (
+            <span className="bottom-badge">
+              {
+                ongoing.filter(
+                  (j) => j.status === "queued" || j.status === "running"
+                ).length
+              }
+            </span>
           )}
         </button>
         <button
