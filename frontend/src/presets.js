@@ -79,7 +79,7 @@ export const ACTION_PRESETS = [
     hint: "missionary",
     mode: "vid",
     prompt:
-      "m15510n4ry, PENISLORA. Photorealistic video of the exact woman in the start image having missionary sex with one man in this same scene: a man with visible torso and hips is with her, exactly one erect penis attached to his body (never floating or detached), he is on top, that connected penis enters her vagina, then continuous in-and-out thrusting for the entire clip — full-shaft travel again and again, not frozen and not a tiny wiggle. Keep her exact same face, hair, expression, and background; same camera angle and framing; no jumpcut, no pose swap; sharp face every frame; one continuous shot.",
+      "m15510n4ry, PENISLORA. Photorealistic POV video: the exact woman from the start image is lying on her back with her legs spread having missionary sex with a man. A man is thrusting his penis back and forth inside her vagina at the bottom of the screen — exactly one erect penis attached to his hips (never floating or detached), continuous in-and-out thrusting for the entire clip with full-shaft travel again and again. Movement is fast with bouncing breasts, not frozen and not a tiny wiggle. Keep her exact same face, hair, and skin tone; sharp face every frame; one continuous shot.",
   },
 ];
 
