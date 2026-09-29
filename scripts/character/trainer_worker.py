@@ -16,6 +16,7 @@ Kept alive by scripts/wan_stack_watchdog.py and the WanTrainerKeepalive schedule
 from __future__ import annotations
 
 import asyncio
+import faulthandler
 import io
 import msvcrt
 import os
@@ -27,6 +28,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
@@ -104,6 +106,30 @@ def log(msg: str) -> None:
 
 def now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def kill_orphan_trainers() -> int:
+    """sd-scripts keeps running if the worker dies; only one worker exists, so any run is an orphan."""
+    ps = (
+        "Get-CimInstance Win32_Process -Filter \"CommandLine like '%flux_train_network%' "
+        "and Name <> 'powershell.exe'\" "
+        "| ForEach-Object { $_.ProcessId }"
+    )
+    try:
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps],
+            capture_output=True, text=True, timeout=60, creationflags=subprocess.CREATE_NO_WINDOW,
+        ).stdout
+    except Exception as exc:
+        log(f"orphan check failed: {exc}")
+        return 0
+    pids = [int(p) for p in out.split() if p.isdigit() and int(p) != os.getpid()]
+    for pid in pids:
+        subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True)
+    if pids:
+        log(f"killed orphan sd-scripts processes: {pids}")
+        time.sleep(5)
+    return len(pids)
 
 
 def latest_state(out_dir: Path, out_name: str) -> tuple[Optional[Path], int]:
@@ -223,6 +249,7 @@ class Worker:
 
     def recover_after_crash(self) -> None:
         """Only one worker exists, so anything 'busy' at startup was interrupted."""
+        kill_orphan_trainers()
         for src, dst in (("dataset_building", "dataset_queued"), ("training", "train_queued")):
             res = self.db.trainings.update_many({"status": src}, {"$set": {"status": dst, "updated_at": now()}})
             if res.modified_count:
@@ -319,7 +346,7 @@ class Worker:
                 continue
             self.progress(tid, "dataset", i - 1, total, f"Making shot {i} of {total}: {caption}")
             data = None
-            for attempt in (1, 2):
+            for attempt in (1, 2, 3):
                 try:
                     data, _ = await client.generate_image(
                         hero_bytes,
@@ -333,7 +360,7 @@ class Worker:
                     break
                 except Exception as exc:
                     log(f"shot {i} attempt {attempt} failed: {exc}")
-                    await asyncio.sleep(5)
+                    await asyncio.sleep(20 * attempt)
             if data is None:
                 warnings.append(f"shot {i} ({caption}) failed")
                 continue
@@ -458,6 +485,7 @@ class Worker:
             ),
             encoding="utf-8",
         )
+        kill_orphan_trainers()
         log(f"training {tid} ({slug}): {len(images)} shots, {total} steps, resume epoch {done_epochs}")
         self.update(tid, train_started_at=now())
         proc = launch_sd_scripts(toml, out_dir, out_name, T.EPOCHS, state_dir)
@@ -569,7 +597,12 @@ def main() -> int:
         msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
     except OSError:
         return 0
-    Worker().run()
+    faulthandler.enable()
+    try:
+        Worker().run()
+    except BaseException:
+        log("worker crashed:\n" + traceback.format_exc())
+        raise
     return 0
 
 
