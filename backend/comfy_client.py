@@ -27,6 +27,7 @@ from backend.workflows_wan import (
     build_i2i_prompt,
     build_i2v_prompt,
     build_kontext_edit_prompt,
+    build_t2i_prompt,
     fit_dims,
 )
 
@@ -258,6 +259,52 @@ class ComfyClient:
                 except Exception:
                     pass
             raise
+
+    async def generate_t2i(
+        self,
+        prompt: str,
+        *,
+        width: int,
+        height: int,
+        seed: Optional[int] = None,
+        steps: int = 30,
+        guidance: float = 3.0,
+        sampler: str = "euler",
+        scheduler: str = "beta",
+        flux_unet: Optional[str] = None,
+        loras: Optional[list] = None,
+    ) -> tuple[bytes, str, int]:
+        """Flux Dev text-to-image. Returns (bytes, content_type, seed_used)."""
+        seed = seed if seed is not None else random.randint(0, 2**32 - 1)
+        workflow = build_t2i_prompt(
+            positive=prompt,
+            flux_unet=flux_unet or self.settings.flux_unet,
+            flux_clip_l=self.settings.flux_clip_l,
+            flux_t5=self.settings.flux_t5,
+            flux_vae=self.settings.flux_vae,
+            width=width,
+            height=height,
+            steps=steps,
+            guidance=guidance,
+            seed=seed,
+            sampler=sampler,
+            scheduler=scheduler,
+            loras=list(loras or []),
+        )
+        data, ctype = await self._run_and_fetch(
+            workflow, prefer=("images",), input_name=None
+        )
+        return data, ctype, seed
+
+    async def lora_names(self) -> set[str]:
+        """LoRA filenames the remote ComfyUI can load (LoraLoader menu)."""
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            r = await client.get(f"{self.base}/object_info/LoraLoader")
+            r.raise_for_status()
+            info = (r.json() or {}).get("LoraLoader") or {}
+        spec = ((info.get("input") or {}).get("required") or {}).get("lora_name") or []
+        choices = spec[0] if spec and isinstance(spec[0], list) else []
+        return {c for c in choices if isinstance(c, str)}
 
     async def generate_video(
         self,
@@ -551,7 +598,7 @@ class ComfyClient:
         self,
         workflow: dict[str, Any],
         prefer: tuple[str, ...],
-        input_name: str,
+        input_name: Optional[str],
         wait_timeout: Optional[float] = None,
     ) -> tuple[bytes, str]:
         await self.ensure_root()

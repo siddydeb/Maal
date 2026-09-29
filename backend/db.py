@@ -68,9 +68,12 @@ def try_mark_job_running_sync(job_id: str) -> bool:
 
 
 def peek_next_queued_job_sync() -> Optional[dict[str, Any]]:
-    """FCFS: oldest queued job that still has a start image."""
+    """FCFS: oldest queued job that still has a start image (t2i needs none)."""
     doc = _sync_jobs().find_one(
-        {"status": "queued", "input_gridfs_id": {"$ne": None}},
+        {
+            "status": "queued",
+            "$or": [{"input_gridfs_id": {"$ne": None}}, {"mode": "t2i"}],
+        },
         sort=[("created_at", 1)],
     )
     return _serialize_job(doc) if doc else None
@@ -649,6 +652,7 @@ async def create_job(
     preset_id: Optional[str] = None,
     test_run: bool = False,
     client_key: Optional[str] = None,
+    options: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     import io
     import uuid as _uuid
@@ -674,6 +678,7 @@ async def create_job(
         "preset_id": preset_id,
         "test_run": bool(test_run),
         "client_key": client_key,
+        "options": dict(options or {}),
         "error": None,
         "result": None,
         "created_at": now,
@@ -1011,7 +1016,7 @@ async def reclaim_active_jobs_on_startup() -> list[dict[str, Any]]:
                 await delete_job_input(str(oid))
                 continue
 
-        if not doc.get("input_gridfs_id"):
+        if not doc.get("input_gridfs_id") and doc.get("mode") != "t2i":
             await db().jobs.update_one(
                 {"_id": oid, "status": {"$in": ["queued", "running"]}},
                 {
@@ -1150,7 +1155,7 @@ def _serialize_job(doc: dict[str, Any]) -> dict[str, Any]:
         if jid:
             out["input_thumb_url"] = f"/api/jobs/{jid}/input-thumb?w=240"
     else:
-        out["resumable"] = False
+        out["resumable"] = out.get("mode") == "t2i"
         out["input_thumb_url"] = None
     return out
 

@@ -29,6 +29,7 @@ import {
   listTestRefs,
   testRefThumbUrl,
   getEta,
+  getT2iConfig,
   listPresets,
   listReviewBins,
   friendlyNetworkMessage,
@@ -39,6 +40,7 @@ import { presetById, presetsForMode, setActionPresets } from "./presets";
 import { setReviewBins } from "./reviewBins";
 import TestRefs from "./TestRefs.jsx";
 import TestInputs from "./TestInputs.jsx";
+import TrainGirl from "./TrainGirl.jsx";
 import TestReview from "./TestReview.jsx";
 
 const PROMPT_MAX = 3000;
@@ -208,6 +210,7 @@ export default function App() {
   const [libraryTotal, setLibraryTotal] = useState(0);
   const [libraryPage, setLibraryPage] = useState(0);
   const [ongoing, setOngoing] = useState([]);
+  const [queuePaused, setQueuePaused] = useState(false);
   const LIBRARY_PAGE_SIZE = 30;
   const [healthText, setHealthText] = useState("—");
   const [view, setView] = useState("generation"); // generation | ongoing | library | refs | inputs | review
@@ -229,6 +232,11 @@ export default function App() {
   const [opsOpen, setOpsOpen] = useState(true);
   const [, setPresetRev] = useState(0);
   const [eta, setEta] = useState(null);
+  const [t2iConfig, setT2iConfig] = useState(null);
+  const [t2iCharacter, setT2iCharacter] = useState("");
+  const [t2iOutfit, setT2iOutfit] = useState("");
+  const [t2iAspect, setT2iAspect] = useState("");
+  const [t2iSeed, setT2iSeed] = useState("");
 
   useEffect(() => {
     let cancelled = false;
@@ -238,6 +246,15 @@ export default function App() {
         if (!cancelled && data?.presets?.length) setActionPresets(data.presets);
       } catch {
         /* keep generic fallbacks */
+      }
+      try {
+        const cfg = await getT2iConfig();
+        if (!cancelled && cfg) {
+          setT2iConfig(cfg);
+          setT2iAspect((a) => a || cfg.default_aspect || "");
+        }
+      } catch {
+        /* text-to-image options unavailable */
       }
       try {
         const bins = await listReviewBins();
@@ -298,6 +315,7 @@ export default function App() {
     try {
       const data = await listActiveJobs(40);
       setOngoing(data.items || []);
+      setQueuePaused(Boolean(data.paused_for_training));
     } catch {
       /* keep previous list on transient errors */
     }
@@ -874,8 +892,15 @@ export default function App() {
     videoSeconds: secs,
     presetId,
   }) {
-    if (!file) {
+    const isT2i = genMode === "t2i";
+    if (!file && !isT2i) {
       setStatus("Add an image first.");
+      setStatusError(true);
+      return;
+    }
+    const seedText = String(t2iSeed || "").trim();
+    if (isT2i && seedText && !/^\d+$/.test(seedText)) {
+      setStatus("Seed must be a whole number (or leave it empty for random).");
       setStatusError(true);
       return;
     }
@@ -894,10 +919,14 @@ export default function App() {
       const started = await startJob({
         mode: genMode,
         prompt: trimmed,
-        file,
+        file: isT2i ? null : file,
+        seed: isT2i && seedText ? Number(seedText) : undefined,
         videoSeconds: genMode === "vid" ? secs : undefined,
         presetId: presetId || undefined,
         testRun: tester,
+        t2i: isT2i
+          ? { character: t2iCharacter, outfit: t2iOutfit, aspect: t2iAspect }
+          : undefined,
       });
       setLastPresetId(presetId || null);
       if (started?.id) saveActiveJobId(started.id, { mode: genMode });
@@ -961,7 +990,7 @@ export default function App() {
   async function onPreset(presetId) {
     const preset = presetsForMode(mode).find((p) => p.id === presetId);
     if (!preset) return;
-    if (!file) {
+    if (!file && mode !== "t2i") {
       setStatus("Add an image first, then tap an action.");
       setStatusError(true);
       return;
@@ -1047,7 +1076,7 @@ export default function App() {
     mode === "vid" ? "Queue video" : "Queue image";
 
   const measuredEstimate = formatEstimate(
-    mode === "vid" ? eta?.vid_sec : eta?.img_sec
+    mode === "vid" ? eta?.vid_sec : mode === "t2i" ? eta?.t2i_sec : eta?.img_sec
   );
   const estimateLabel = measuredEstimate
     ? `Runs one-at-a-time · ~${measuredEstimate} each`
@@ -1135,6 +1164,18 @@ export default function App() {
         >
           <IconReview className="tab-ico" />
           <span>Review</span>
+        </button>
+      )}
+      {tester && (
+        <button
+          type="button"
+          className={`top-tab${view === "train" ? " active" : ""}`}
+          role="tab"
+          aria-selected={view === "train"}
+          onClick={() => setView("train")}
+        >
+          <IconSpark className="tab-ico" />
+          <span>Train girl</span>
         </button>
       )}
       <button
@@ -1277,9 +1318,107 @@ export default function App() {
                       <strong>Image to Video</strong>
                       <span className="mode-card-desc">Animate images with AI</span>
                     </button>
+                    <button
+                      type="button"
+                      className={`mode-card${mode === "t2i" ? " active" : ""}`}
+                      role="tab"
+                      aria-selected={mode === "t2i"}
+                      onClick={() => setMode("t2i")}
+                    >
+                      <span className="mode-card-icon">
+                        <IconSpark />
+                      </span>
+                      <strong>Text to Image</strong>
+                      <span className="mode-card-desc">Create a girl from words</span>
+                    </button>
                   </div>
                 </div>
 
+                {mode === "t2i" && (
+                  <div className="section t2i-section">
+                    <h2 className="section-title">Girl &amp; Look</h2>
+                    <label className="t2i-field">
+                      <span>Girl</span>
+                      <select
+                        value={t2iCharacter}
+                        onChange={(e) => setT2iCharacter(e.target.value)}
+                      >
+                        <option value="">New random girl (describe her)</option>
+                        {(t2iConfig?.characters || []).map((c) => (
+                          <option key={c.id} value={c.id} disabled={!c.installed}>
+                            {c.name}
+                            {c.installed ? "" : " (training…)"}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="t2i-field">
+                      <span>Outfit</span>
+                      <select
+                        value={t2iOutfit}
+                        onChange={(e) => setT2iOutfit(e.target.value)}
+                      >
+                        <option value="">From my prompt</option>
+                        {(t2iConfig?.outfits || []).map((o) => (
+                          <option key={o.id} value={o.id}>
+                            {o.name}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <div className="t2i-field">
+                      <span>Shape</span>
+                      <div className="duration">
+                        {(t2iConfig?.aspects || []).map((a) => (
+                          <button
+                            key={a.id}
+                            type="button"
+                            className={`duration-btn${t2iAspect === a.id ? " active" : ""}`}
+                            aria-pressed={t2iAspect === a.id}
+                            title={`${a.width}×${a.height}`}
+                            onClick={() => setT2iAspect(a.id)}
+                          >
+                            {a.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                    <label className="t2i-field">
+                      <span>Seed</span>
+                      <div className="t2i-seed">
+                        <input
+                          type="text"
+                          inputMode="numeric"
+                          placeholder="random"
+                          value={t2iSeed}
+                          onChange={(e) => setT2iSeed(e.target.value.replace(/[^\d]/g, ""))}
+                        />
+                        {result?.seed != null && (
+                          <button
+                            type="button"
+                            className="ghost"
+                            title="Same seed + same prompt = same picture"
+                            onClick={() => setT2iSeed(String(result.seed))}
+                          >
+                            Use last ({result.seed})
+                          </button>
+                        )}
+                        {t2iSeed && (
+                          <button type="button" className="ghost" onClick={() => setT2iSeed("")}>
+                            Random
+                          </button>
+                        )}
+                      </div>
+                    </label>
+                    {t2iConfig && !t2iConfig.realism_ready && (
+                      <p className="setting-hint">
+                        Realism LoRAs not visible on ComfyUI yet — results will look more plastic.
+                      </p>
+                    )}
+                  </div>
+                )}
+
+                {mode !== "t2i" && (
                 <div className="section">
                   <div className="section-head">
                     <h2 className="section-title">Upload Input</h2>
@@ -1364,6 +1503,7 @@ export default function App() {
                     </button>
                   )}
                 </div>
+                )}
               </div>
 
               <div className="gen-side">
@@ -1382,7 +1522,9 @@ export default function App() {
                     placeholder={
                       mode === "vid"
                         ? "e.g. oral, oral insertion, reveal penis, missionary, cowgirl, doggy, handjob, cumshot…"
-                        : "e.g. nude, cumshot on face, cuminator, cumhere, enhance boobs…"
+                        : mode === "t2i"
+                          ? "e.g. 23 year old woman, long black hair, brown eyes, freckles, sitting on a bed in a sunny bedroom, looking at the camera…"
+                          : "e.g. nude, cumshot on face, cuminator, cumhere, enhance boobs…"
                     }
                     value={prompt}
                     onChange={(e) => setPrompt(e.target.value.slice(0, PROMPT_MAX))}
@@ -1429,6 +1571,7 @@ export default function App() {
                     </div>
                   )}
 
+                  {presetsForMode(mode).length > 0 && (
                   <div
                     className="setting-block"
                     role="group"
@@ -1458,6 +1601,7 @@ export default function App() {
                       ))}
                     </div>
                   </div>
+                  )}
                 </div>
 
                 <button
@@ -1645,6 +1789,12 @@ export default function App() {
           </section>
         )}
 
+        {view === "train" && tester && (
+          <section className="panel view-panel">
+            <TrainGirl />
+          </section>
+        )}
+
         {view === "ongoing" && (
           <section className="panel view-panel history">
             <div className="history-head">
@@ -1667,6 +1817,11 @@ export default function App() {
               FCFS queue — submit as many as you want; the GPU runs one at a time.
               Cancel removes only that job. Clear queue empties everything if something is stuck.
             </p>
+            {queuePaused && (
+              <p className="ongoing-note train-paused">
+                Paused — a girl is training on the GPU. Queued gens start automatically when it finishes.
+              </p>
+            )}
             <ul className="ongoing-list">
               {!ongoing.length && (
                 <li className="empty">No active generations right now.</li>
@@ -2034,6 +2189,16 @@ export default function App() {
           >
             <IconReview className="bottom-ico" />
             <span>Review</span>
+          </button>
+        )}
+        {tester && (
+          <button
+            type="button"
+            className={`bottom-item${view === "train" ? " active" : ""}`}
+            onClick={() => setView("train")}
+          >
+            <IconSpark className="bottom-ico" />
+            <span>Train</span>
           </button>
         )}
         <button

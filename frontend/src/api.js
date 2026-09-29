@@ -73,6 +73,64 @@ export async function getEta() {
   return readJson(res);
 }
 
+export async function getTrainStatus() {
+  const res = await fetch(url("/api/train/status"), {
+    headers: authHeaders(),
+    cache: "no-store",
+  });
+  return readJson(res);
+}
+
+export async function listTrainHeroes() {
+  const res = await fetch(url("/api/train/heroes"), {
+    headers: authHeaders(),
+    cache: "no-store",
+  });
+  return readJson(res);
+}
+
+export async function createTraining(name, heroGenerationId) {
+  const body = new FormData();
+  body.append("name", name);
+  body.append("hero_generation_id", heroGenerationId);
+  const res = await fetch(url("/api/train"), {
+    method: "POST",
+    body,
+    headers: authHeaders(),
+  });
+  return readJson(res);
+}
+
+export async function getTraining(id) {
+  const res = await fetch(url(`/api/train/${id}`), {
+    headers: authHeaders(),
+    cache: "no-store",
+  });
+  return readJson(res);
+}
+
+async function trainAction(path, method = "POST") {
+  const res = await fetch(url(path), { method, headers: authHeaders() });
+  return readJson(res);
+}
+
+export const startTraining = (id) => trainAction(`/api/train/${id}/start`);
+export const cancelTraining = (id) => trainAction(`/api/train/${id}/cancel`);
+export const deleteTraining = (id) => trainAction(`/api/train/${id}`, "DELETE");
+export const deleteTrainImage = (id) => trainAction(`/api/train/images/${id}`, "DELETE");
+
+export function authedUrl(path) {
+  return path ? url(withAuthQuery(path)) : "";
+}
+
+export async function getT2iConfig() {
+  const res = await fetch(url("/api/t2i/config"), {
+    headers: authHeaders(),
+    cache: "no-store",
+  });
+  return readJson(res);
+}
+
 export async function listReviewBins() {
   const res = await fetch(url("/api/test/review-bins"), {
     headers: authHeaders(),
@@ -299,6 +357,7 @@ export async function startJob({
   onStatus,
   attempts = 3,
   clientKey,
+  t2i,
 }) {
   // One key for this tap — retries must not create extra queue entries.
   const idem =
@@ -311,7 +370,12 @@ export async function startJob({
     const body = new FormData();
     body.append("mode", mode);
     body.append("prompt", prompt);
-    body.append("image", file, file.name || "input.png");
+    if (file) body.append("image", file, file.name || "input.png");
+    if (mode === "t2i" && t2i) {
+      if (t2i.character) body.append("character", t2i.character);
+      if (t2i.outfit) body.append("outfit", t2i.outfit);
+      if (t2i.aspect) body.append("aspect", t2i.aspect);
+    }
     body.append("client_key", idem);
     if (negative) body.append("negative", negative);
     if (seed != null && seed !== "") body.append("seed", String(seed));

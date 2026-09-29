@@ -36,6 +36,7 @@ OVERLAY_FILES = (
     "video_v1.py",
     "lora_files.py",
     "catalog_loras.py",
+    "t2i.json",
 )
 
 

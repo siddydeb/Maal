@@ -208,6 +208,11 @@ def _dispatcher_tick() -> None:
                 return
             _active_worker_job_id = None
 
+    from backend.training import gpu_held_by_training_sync
+
+    if gpu_held_by_training_sync():
+        return
+
     nxt = db.peek_next_queued_job_sync()
     if not nxt:
         return
@@ -554,15 +559,18 @@ async def generate(
 
 @app.post("/api/jobs")
 async def start_job(
-    mode: Literal["img", "vid"] = Form(...),
+    mode: Literal["img", "vid", "t2i"] = Form(...),
     prompt: str = Form(...),
-    image: UploadFile = File(...),
+    image: Optional[UploadFile] = File(None),
     negative: Optional[str] = Form(None),
     seed: Optional[int] = Form(None),
     video_seconds: Optional[str] = Form(None),
     preset_id: Optional[str] = Form(None),
     test_run: Optional[str] = Form(None),
     client_key: Optional[str] = Form(None),
+    character: Optional[str] = Form(None),
+    outfit: Optional[str] = Form(None),
+    aspect: Optional[str] = Form(None),
     owner: str = Depends(require_owner),
 ):
     """
@@ -571,10 +579,28 @@ async def start_job(
 
     Optional client_key: idempotency token so mobile/network retries of the same
     tap do not enqueue duplicate jobs.
+
+    mode=t2i needs no image; character/outfit/aspect pick entries from t2i config.
     """
     prompt = (prompt or "").strip()
     if not prompt:
         raise HTTPException(400, "Prompt is required")
+    if mode != "t2i" and image is None:
+        raise HTTPException(400, "An image is required for this mode")
+
+    t2i_options: dict = {}
+    if mode == "t2i":
+        from backend import t2i as t2i_mod
+
+        t2i_options = {
+            "character": (character or "").strip() or None,
+            "outfit": (outfit or "").strip() or None,
+            "aspect": (aspect or "").strip() or None,
+        }
+        try:
+            t2i_mod.plan_t2i(prompt, cfg=t2i_mod.load_config(), installed=None, **t2i_options)
+        except t2i_mod.T2IError as exc:
+            raise HTTPException(400, str(exc)) from exc
 
     idem = db.normalize_client_key(client_key)
     if idem:
@@ -609,7 +635,7 @@ async def start_job(
     )
     if is_tester_owner(owner):
         is_test = True
-    image_bytes = await _read_image_bytes(image)
+    image_bytes = await _read_image_bytes(image) if mode != "t2i" else None
     client = _comfy()
     settings = get_settings()
     if not await client.health(timeout=12.0, retries=3):
@@ -644,6 +670,7 @@ async def start_job(
         preset_id=preset,
         test_run=is_test,
         client_key=idem,
+        options=t2i_options,
     )
     # Persist only — FCFS dispatcher loads from GridFS and runs one at a time.
     # Do not hold image_bytes in a waiting thread (Render RAM).
@@ -672,7 +699,15 @@ async def list_jobs(
         items = await db.list_active_jobs(owner=owner, limit=limit)
     else:
         items = await db.list_recent_jobs(owner=owner, limit=limit)
-    return _json({"items": items, "total": len(items)})
+    from backend.training import gpu_held_by_training_sync
+
+    return _json(
+        {
+            "items": items,
+            "total": len(items),
+            "paused_for_training": gpu_held_by_training_sync(),
+        }
+    )
 
 
 @app.post("/api/jobs/clear-queue")
@@ -774,13 +809,14 @@ async def _execute_generation(
     mode: str,
     prompt: str,
     prompt_en: str,
-    image_bytes: bytes,
+    image_bytes: Optional[bytes],
     negative: Optional[str],
     seed: Optional[int],
     resolved: dict,
     video_seconds: Optional[float] = None,
     owner: Optional[str] = None,
     extra_meta: Optional[dict] = None,
+    options: Optional[dict] = None,
 ) -> dict:
     from backend.ai_engine import run as ai_engine_run
     from backend.ai_engine.schema import GenerateRequest
@@ -802,49 +838,69 @@ async def _execute_generation(
     engine_meta: dict = {}
 
     try:
-        result = await ai_engine_run(
-            GenerateRequest(
-                mode=mode,
-                prompt=prompt,
-                prompt_english=prompt_en,
-                image_bytes=image_bytes,
-                negative=negative,
-                seed=seed,
-                profile="quality",
-                channel="stable",
-                video_seconds=video_seconds if mode == "vid" else None,
-            ),
-            settings=settings,
-        )
-        data = result.data
-        content_type = result.content_type
-        kind = result.kind
-        engine_meta = {
-            "workflow_ref": result.workflow_ref,
-            "task_type": result.plan.task_type,
-            "planner_path": result.plan.planner_path,
-            "profile": result.plan.profile,
-            "backbone_model_id": result.backbone.model_id if result.backbone else None,
-            "backbone_tier": result.backbone.tier if result.backbone else None,
-            "model_label": result.model_label,
-            "recovery_events": result.recovery_events,
-            "engine_warnings": result.warnings,
-            "perception": result.perception_meta,
-            "plan": result.plan.to_meta(),
-        }
-        if kind == "img":
+        if mode == "t2i":
+            from backend import t2i as t2i_mod
+
+            opts = options or {}
+            try:
+                data, content_type, engine_meta = await t2i_mod.run_t2i(
+                    client,
+                    prompt_en,
+                    seed=seed,
+                    character_id=opts.get("character"),
+                    outfit_id=opts.get("outfit"),
+                    aspect=opts.get("aspect"),
+                )
+            except t2i_mod.T2IError as exc:
+                raise HTTPException(400, str(exc)) from exc
+            kind = "img"
             filename = f"wan_img_{uuid.uuid4().hex}.png"
             if "jpeg" in content_type or "jpg" in content_type:
                 filename = filename.replace(".png", ".jpg")
-            elif "webp" in content_type:
-                filename = filename.replace(".png", ".webp")
         else:
-            ext = "mp4"
-            if "webm" in content_type:
-                ext = "webm"
-            elif "gif" in content_type:
-                ext = "gif"
-            filename = f"wan_vid_{uuid.uuid4().hex}.{ext}"
+            result = await ai_engine_run(
+                GenerateRequest(
+                    mode=mode,
+                    prompt=prompt,
+                    prompt_english=prompt_en,
+                    image_bytes=image_bytes,
+                    negative=negative,
+                    seed=seed,
+                    profile="quality",
+                    channel="stable",
+                    video_seconds=video_seconds if mode == "vid" else None,
+                ),
+                settings=settings,
+            )
+            data = result.data
+            content_type = result.content_type
+            kind = result.kind
+            engine_meta = {
+                "workflow_ref": result.workflow_ref,
+                "task_type": result.plan.task_type,
+                "planner_path": result.plan.planner_path,
+                "profile": result.plan.profile,
+                "backbone_model_id": result.backbone.model_id if result.backbone else None,
+                "backbone_tier": result.backbone.tier if result.backbone else None,
+                "model_label": result.model_label,
+                "recovery_events": result.recovery_events,
+                "engine_warnings": result.warnings,
+                "perception": result.perception_meta,
+                "plan": result.plan.to_meta(),
+            }
+            if kind == "img":
+                filename = f"wan_img_{uuid.uuid4().hex}.png"
+                if "jpeg" in content_type or "jpg" in content_type:
+                    filename = filename.replace(".png", ".jpg")
+                elif "webp" in content_type:
+                    filename = filename.replace(".png", ".webp")
+            else:
+                ext = "mp4"
+                if "webm" in content_type:
+                    ext = "webm"
+                elif "gif" in content_type:
+                    ext = "gif"
+                filename = f"wan_vid_{uuid.uuid4().hex}.{ext}"
     except ComfyUIError as exc:
         raise HTTPException(502, f"Generation failed: {exc}") from exc
     except KeyError as exc:
@@ -856,7 +912,7 @@ async def _execute_generation(
     assert data is not None
     model_label = engine_meta.get("model_label") or (
         settings.flux_unet
-        if mode == "img"
+        if mode in ("img", "t2i")
         else f"{settings.wan_unet_high}+{settings.wan_unet_low}"
     )
 
@@ -905,16 +961,18 @@ async def _execute_generation(
         "local_residue": False,
         "workflow_ref": engine_meta.get("workflow_ref"),
         "task_type": engine_meta.get("task_type"),
+        "seed": engine_meta.get("seed_used", seed),
     }
 
 
 async def _resume_persisted_job(job: dict) -> None:
     """Re-run a queued/running job after API worker restart using stored start image."""
     job_id = job["id"]
-    image_bytes = db.get_job_input_bytes_sync(job_id)
-    if not image_bytes:
+    needs_image = (job.get("mode") or "img") != "t2i"
+    image_bytes = db.get_job_input_bytes_sync(job_id) if needs_image else None
+    if needs_image and not image_bytes:
         image_bytes = await db.get_job_input_bytes(job_id)
-    if not image_bytes:
+    if needs_image and not image_bytes:
         db.finish_job_if_active_sync(
             job_id,
             status="failed",
@@ -958,6 +1016,7 @@ async def _resume_persisted_job(job: dict) -> None:
             "preset_id": job.get("preset_id"),
             "test_run": bool(job.get("test_run")),
         },
+        options=job.get("options") or None,
     )
 
 
@@ -967,13 +1026,14 @@ async def _run_job(
     mode: str,
     prompt: str,
     prompt_en: str,
-    image_bytes: bytes,
+    image_bytes: Optional[bytes],
     negative: Optional[str],
     seed: Optional[int],
     resolved: dict,
     video_seconds: Optional[float] = None,
     owner: Optional[str] = None,
     extra_meta: Optional[dict] = None,
+    options: Optional[dict] = None,
 ) -> None:
     # Claim must succeed — if cancel already finalized, do not touch Comfy.
     if not db.try_mark_job_running_sync(job_id):
@@ -1002,6 +1062,7 @@ async def _run_job(
                 video_seconds=video_seconds,
                 owner=owner,
                 extra_meta=extra_meta,
+                options=options,
             ),
             timeout=hard_limit,
         )
@@ -1157,7 +1218,129 @@ async def eta(_owner: str = Depends(require_owner)):
     """Median observed generation time per mode, from recently completed jobs."""
     img_sec = await db.get_avg_duration_sec("img")
     vid_sec = await db.get_avg_duration_sec("vid")
-    return _json({"img_sec": img_sec, "vid_sec": vid_sec})
+    t2i_sec = await db.get_avg_duration_sec("t2i")
+    return _json({"img_sec": img_sec, "vid_sec": vid_sec, "t2i_sec": t2i_sec})
+
+
+@app.get("/api/t2i/config")
+async def t2i_config(_owner: str = Depends(require_owner)):
+    """Characters, saved outfits and aspect sizes for text-to-image mode."""
+    from backend import t2i as t2i_mod
+
+    installed = await t2i_mod.installed_loras(_comfy())
+    return _json(t2i_mod.public_config(t2i_mod.load_config(), installed))
+
+
+def _training_http(exc: Exception) -> HTTPException:
+    msg = str(exc) or "Training request failed"
+    return HTTPException(404 if msg == "Not found" else 400, msg)
+
+
+@app.get("/api/train/status")
+async def train_status(owner: str = Depends(require_tester)):
+    from backend import training
+
+    return _json(
+        {
+            "worker": await training.worker_status(),
+            "trainings": await training.list_trainings(owner),
+            "min_images": training.MIN_IMAGES,
+        }
+    )
+
+
+@app.get("/api/train/heroes")
+async def train_heroes(owner: str = Depends(require_tester)):
+    from backend import training
+
+    return _json({"items": await training.hero_candidates(owner)})
+
+
+@app.post("/api/train")
+async def train_create(
+    name: str = Form(...),
+    hero_generation_id: str = Form(...),
+    owner: str = Depends(require_tester),
+):
+    from backend import training
+
+    try:
+        return _json(await training.create_training(owner, name, hero_generation_id))
+    except training.TrainingError as exc:
+        raise _training_http(exc) from exc
+
+
+@app.get("/api/train/images/{image_id}")
+async def train_image(
+    image_id: str,
+    w: Optional[int] = Query(None, ge=64, le=2048),
+    owner: str = Depends(require_tester),
+):
+    from backend import training
+
+    try:
+        raw, ctype = await training.read_image(owner, image_id)
+    except training.TrainingError as exc:
+        raise _training_http(exc) from exc
+    if w:
+        img = Image.open(io.BytesIO(raw)).convert("RGB")
+        img.thumbnail((int(w), int(w) * 2), Image.Resampling.LANCZOS)
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=80, optimize=True)
+        raw, ctype = buf.getvalue(), "image/jpeg"
+    return StreamingResponse(io.BytesIO(raw), media_type=ctype, headers=NO_STORE)
+
+
+@app.delete("/api/train/images/{image_id}")
+async def train_image_delete(image_id: str, owner: str = Depends(require_tester)):
+    from backend import training
+
+    try:
+        await training.delete_image(owner, image_id)
+    except training.TrainingError as exc:
+        raise _training_http(exc) from exc
+    return _json({"ok": True})
+
+
+@app.get("/api/train/{training_id}")
+async def train_get(training_id: str, owner: str = Depends(require_tester)):
+    from backend import training
+
+    try:
+        return _json(await training.get_training(owner, training_id))
+    except training.TrainingError as exc:
+        raise _training_http(exc) from exc
+
+
+@app.post("/api/train/{training_id}/start")
+async def train_start(training_id: str, owner: str = Depends(require_tester)):
+    from backend import training
+
+    try:
+        return _json(await training.start_training(owner, training_id))
+    except training.TrainingError as exc:
+        raise _training_http(exc) from exc
+
+
+@app.post("/api/train/{training_id}/cancel")
+async def train_cancel(training_id: str, owner: str = Depends(require_tester)):
+    from backend import training
+
+    try:
+        return _json(await training.cancel_training(owner, training_id))
+    except training.TrainingError as exc:
+        raise _training_http(exc) from exc
+
+
+@app.delete("/api/train/{training_id}")
+async def train_delete(training_id: str, owner: str = Depends(require_tester)):
+    from backend import training
+
+    try:
+        await training.delete_training(owner, training_id)
+    except training.TrainingError as exc:
+        raise _training_http(exc) from exc
+    return _json({"ok": True})
 
 
 @app.get("/api/test/review-bins")

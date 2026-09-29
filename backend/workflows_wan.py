@@ -514,6 +514,107 @@ def build_kontext_edit_prompt(
     return graph
 
 
+def build_t2i_prompt(
+    *,
+    positive: str,
+    flux_unet: str,
+    flux_clip_l: str,
+    flux_t5: str,
+    flux_vae: str,
+    width: int,
+    height: int,
+    steps: int,
+    guidance: float,
+    seed: int,
+    sampler: str = "euler",
+    scheduler: str = "beta",
+    loras: list[tuple[str, float, float]] | None = None,
+) -> dict[str, Any]:
+    """
+    Flux Dev text-to-image: empty latent → KSampler denoise=1.0.
+
+    Flux Dev is guidance-distilled (cfg=1), so the negative is a zeroed
+    conditioning. LoRA strengths may be negative (e.g. SameFace Fix).
+    """
+    width, height = _snap(width), _snap(height)
+    graph: dict[str, Any] = {
+        "1": {
+            "class_type": "UNETLoader",
+            "inputs": {"unet_name": flux_unet, "weight_dtype": "default"},
+        },
+        "2": {
+            "class_type": "DualCLIPLoader",
+            "inputs": {
+                "clip_name1": flux_clip_l,
+                "clip_name2": flux_t5,
+                "type": "flux",
+                "device": "default",
+            },
+        },
+        "3": {
+            "class_type": "VAELoader",
+            "inputs": {"vae_name": flux_vae},
+        },
+    }
+    model_ref, clip_ref, clip_slot = _inject_loras(
+        graph, model_node="1", clip_node="2", loras=list(loras or [])
+    )
+    graph.update(
+        {
+            "4": {
+                "class_type": "CLIPTextEncode",
+                "inputs": {"text": (positive or "").strip(), "clip": [clip_ref, clip_slot]},
+            },
+            "5": {
+                "class_type": "ConditioningZeroOut",
+                "inputs": {"conditioning": ["4", 0]},
+            },
+            "6": {
+                "class_type": "FluxGuidance",
+                "inputs": {"conditioning": ["4", 0], "guidance": float(guidance)},
+            },
+            "7": {
+                "class_type": "EmptySD3LatentImage",
+                "inputs": {"width": width, "height": height, "batch_size": 1},
+            },
+            "10": {
+                "class_type": "ModelSamplingFlux",
+                "inputs": {
+                    "model": [model_ref, 0],
+                    "max_shift": 1.15,
+                    "base_shift": 0.5,
+                    "width": width,
+                    "height": height,
+                },
+            },
+            "11": {
+                "class_type": "KSampler",
+                "inputs": {
+                    "model": ["10", 0],
+                    "seed": seed,
+                    "steps": max(8, int(steps)),
+                    "cfg": 1.0,
+                    "sampler_name": sampler,
+                    "scheduler": scheduler,
+                    "positive": ["6", 0],
+                    "negative": ["5", 0],
+                    "latent_image": ["7", 0],
+                    "denoise": 1.0,
+                },
+            },
+            "12": {
+                "class_type": "VAEDecode",
+                "inputs": {"samples": ["11", 0], "vae": ["3", 0]},
+            },
+            "13": {
+                "class_type": "SaveImage",
+                "inputs": {"images": ["12", 0], "filename_prefix": "flux_i2i_t2i"},
+            },
+        }
+    )
+    return graph
+
+
 def _inject_loras_model_only(
     graph: dict[str, Any],
     *,

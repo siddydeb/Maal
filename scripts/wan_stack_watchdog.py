@@ -662,6 +662,29 @@ def ensure_gpu_agent(tokens: dict[str, str]) -> None:
     log("WARNING: gpu_agent did not become healthy")
 
 
+TRAINER_HEARTBEAT = Path(r"E:\LoraTraining\trainer_worker.heartbeat")
+
+
+def ensure_trainer() -> None:
+    """Keep the character-LoRA trainer worker alive (it exits if one is already running)."""
+    if not (Path(r"E:\LoraTraining\sd-scripts") / "venv").is_dir():
+        return
+    try:
+        if time.time() - TRAINER_HEARTBEAT.stat().st_mtime < 90:
+            return
+    except OSError:
+        pass
+    log("trainer worker down — starting…")
+    logf = open(REPO / "tmp_test" / "trainer_worker.log", "a", encoding="utf-8")
+    subprocess.Popen(
+        [sys.executable, str(REPO / "scripts" / "character" / "trainer_worker.py")],
+        cwd=str(REPO),
+        stdout=logf,
+        stderr=subprocess.STDOUT,
+        creationflags=_no_window_flags(),
+    )
+
+
 def ensure_prowler(tokens: dict[str, str]) -> None:
     """Keep Prowler Control (FastAPI + built UI) listening on :8010."""
     if http_ok("http://127.0.0.1:8010/api/auth/status"):
@@ -766,6 +789,7 @@ def heal_once(tokens: dict[str, str], procs: dict[str, subprocess.Popen]) -> Non
     ensure_gpu_agent(tokens)
     ensure_prowler(tokens)
     ensure_scapper(tokens)
+    ensure_trainer()
 
     if named_tunnel_mode(tokens):
         # One cloudflared → hostnames for :8000 / :8010 / :8188 / :8799
