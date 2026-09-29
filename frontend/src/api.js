@@ -89,10 +89,11 @@ export async function listTrainHeroes() {
   return readJson(res);
 }
 
-export async function createTraining(name, heroGenerationId) {
+export async function createTraining(name, heroGenerationId, autoStart = false) {
   const body = new FormData();
   body.append("name", name);
   body.append("hero_generation_id", heroGenerationId);
+  body.append("auto_start", autoStart ? "true" : "false");
   const res = await fetch(url("/api/train"), {
     method: "POST",
     body,

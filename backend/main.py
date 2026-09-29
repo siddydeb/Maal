@@ -1260,12 +1260,15 @@ async def train_heroes(owner: str = Depends(require_tester)):
 async def train_create(
     name: str = Form(...),
     hero_generation_id: str = Form(...),
+    auto_start: bool = Form(False),
     owner: str = Depends(require_tester),
 ):
     from backend import training
 
     try:
-        return _json(await training.create_training(owner, name, hero_generation_id))
+        return _json(
+            await training.create_training(owner, name, hero_generation_id, auto_start=auto_start)
+        )
     except training.TrainingError as exc:
         raise _training_http(exc) from exc
 

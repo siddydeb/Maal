@@ -114,7 +114,9 @@ async def hero_candidates(owner: str, limit: int = 48) -> list[dict[str, Any]]:
     ]
 
 
-async def create_training(owner: str, name: str, hero_generation_id: str) -> dict[str, Any]:
+async def create_training(
+    owner: str, name: str, hero_generation_id: str, *, auto_start: bool = False
+) -> dict[str, Any]:
     display = (name or "").strip()[:32]
     slug = slugify(display)
     if await db.db().characters.find_one({"slug": slug}):
@@ -137,6 +139,7 @@ async def create_training(owner: str, name: str, hero_generation_id: str) -> dic
         "trigger": trigger,
         "hero_generation_id": hero_generation_id,
         "status": "dataset_queued",
+        "auto_start": bool(auto_start),
         "progress": {"phase": "dataset", "done": 0, "total": 0, "message": "Waiting for the trainer PC…"},
         "cancel_requested": False,
         "error": None,

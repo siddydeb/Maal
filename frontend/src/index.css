@@ -538,6 +538,13 @@ textarea:focus {
   box-shadow: 0 0 0 3px rgba(196, 240, 77, 0.2);
 }
 
+.train-auto {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.82rem;
+}
+
 .train-card {
   display: flex;
   flex-direction: column;

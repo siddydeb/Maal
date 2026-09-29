@@ -37,6 +37,7 @@ export default function TrainGirl() {
   const [heroes, setHeroes] = useState([]);
   const [heroId, setHeroId] = useState("");
   const [name, setName] = useState("");
+  const [autoStart, setAutoStart] = useState(true);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("");
   const [error, setError] = useState(false);
@@ -89,10 +90,10 @@ export default function TrainGirl() {
       return;
     }
     run(async () => {
-      await createTraining(name.trim(), heroId);
+      await createTraining(name.trim(), heroId, autoStart);
       setName("");
       setHeroId("");
-    }, "Queued — the trainer PC will build her shots.");
+    }, autoStart ? "Queued — shots, then training, run on their own." : "Queued — the trainer PC will build her shots.");
   }
 
   return (
@@ -143,6 +144,10 @@ export default function TrainGirl() {
               </div>
             )}
           </div>
+          <label className="train-auto">
+            <input type="checkbox" checked={autoStart} onChange={(e) => setAutoStart(e.target.checked)} />
+            <span>Start training automatically (skip review; broken shots are dropped)</span>
+          </label>
           <button type="button" className="go" disabled={busy || !worker?.online} onClick={onCreate}>
             <span className="go-main">Build her shots</span>
             <span className="go-sub">

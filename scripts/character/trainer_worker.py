@@ -1,12 +1,15 @@
 """GPU-PC worker for character-LoRA training requested from the app (Train tab, tester PIN).
 
-Nothing stays on this PC between steps:
+Nothing stays on this PC after a training ends:
   - dataset: hero from GridFS → Kontext on local ComfyUI → each shot uploaded to GridFS
-  - training: shots downloaded from GridFS to a temp dir → sd-scripts → LoRA copied into
-    ComfyUI loras → temp dir (images, caches, checkpoints) deleted
+  - training: shots downloaded from GridFS to a work dir → sd-scripts → LoRA copied into
+    ComfyUI loras → work dir (images, caches, checkpoints) deleted
+The work dir survives crashes so training resumes from the last saved epoch; a crashed or
+stalled run is retried up to MAX_ATTEMPTS times.
 While training, the app's job queue pauses (backend.training.gpu_held_by_training_sync).
 
-Started and kept alive by scripts/wan_stack_watchdog.py; safe to run by hand:
+Kept alive by scripts/wan_stack_watchdog.py and the WanTrainerKeepalive scheduled task
+(scripts/character/start_trainer_hidden.vbs); safe to run by hand:
   python scripts/character/trainer_worker.py
 """
 
@@ -16,6 +19,7 @@ import asyncio
 import io
 import msvcrt
 import os
+import queue
 import re
 import shutil
 import socket
@@ -54,6 +58,9 @@ DIM = 16
 LEARNING_RATE = 4e-4
 RESOLUTION = 768
 BLOCKS_TO_SWAP = 10
+MAX_ATTEMPTS = 3
+STALL_SEC = 30 * 60
+UNCHANGED_DIFF = 6.0
 
 KEEP = (
     " Keep her exact same face, facial features, eye color, skin tone, body shape, "
@@ -97,6 +104,67 @@ def log(msg: str) -> None:
 
 def now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def latest_state(out_dir: Path, out_name: str) -> tuple[Optional[Path], int]:
+    """Newest complete per-epoch state dir and its epoch number."""
+    best: tuple[Optional[Path], int] = (None, 0)
+    if not out_dir.is_dir():
+        return best
+    for d in out_dir.glob(f"{out_name}-*-state"):
+        m = re.fullmatch(rf"{re.escape(out_name)}-(\d+)-state", d.name)
+        if m and (d / "train_state.json").is_file() and int(m.group(1)) > best[1]:
+            best = (d, int(m.group(1)))
+    return best
+
+
+def launch_sd_scripts(
+    toml: Path, out_dir: Path, out_name: str, epochs: int, resume: Optional[Path]
+) -> subprocess.Popen:
+    """Flux LoRA run that saves a LoRA + resumable state after every epoch."""
+    cmd = [
+        str(SD_SCRIPTS / "venv" / "Scripts" / "accelerate.exe"), "launch",
+        "--num_processes", "1", "--num_machines", "1", "--mixed_precision", "bf16",
+        "--dynamo_backend", "no", "--num_cpu_threads_per_process", "1",
+        "flux_train_network.py",
+        "--pretrained_model_name_or_path", str(MODELS / "flux1-dev.safetensors"),
+        "--clip_l", str(MODELS / "clip_l.safetensors"),
+        "--t5xxl", str(MODELS / "t5xxl_fp16.safetensors"),
+        "--ae", str(MODELS / "ae.safetensors"),
+        "--dataset_config", str(toml),
+        "--output_dir", str(out_dir), "--output_name", out_name,
+        "--save_model_as", "safetensors", "--save_precision", "bf16",
+        "--network_module", "networks.lora_flux",
+        "--network_dim", str(DIM), "--network_alpha", str(DIM),
+        "--network_train_unet_only",
+        "--optimizer_type", "adafactor",
+        "--optimizer_args", "relative_step=False", "scale_parameter=False", "warmup_init=False",
+        "--lr_scheduler", "constant_with_warmup", "--lr_warmup_steps", "100", "--max_grad_norm", "0.0",
+        "--learning_rate", str(LEARNING_RATE),
+        "--max_train_epochs", str(epochs), "--save_every_n_epochs", "1",
+        "--save_last_n_epochs", "2", "--save_state", "--save_last_n_epochs_state", "1",
+        "--mixed_precision", "bf16", "--fp8_base", "--sdpa", "--gradient_checkpointing",
+        "--blocks_to_swap", str(BLOCKS_TO_SWAP),
+        "--cache_latents", "--cache_latents_to_disk",
+        "--cache_text_encoder_outputs", "--cache_text_encoder_outputs_to_disk",
+        "--guidance_scale", "1.0", "--timestep_sampling", "shift", "--discrete_flow_shift", "3.1582",
+        "--model_prediction_type", "raw", "--loss_type", "l2",
+        "--max_data_loader_n_workers", "1", "--persistent_data_loader_workers",
+        "--seed", "42",
+    ]
+    if resume:
+        cmd += ["--resume", str(resume)]
+    return subprocess.Popen(
+        cmd,
+        cwd=str(SD_SCRIPTS),
+        env={**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"},
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        creationflags=subprocess.CREATE_NO_WINDOW,
+    )
 
 
 class Worker:
@@ -159,8 +227,35 @@ class Worker:
             res = self.db.trainings.update_many({"status": src}, {"$set": {"status": dst, "updated_at": now()}})
             if res.modified_count:
                 log(f"re-queued {res.modified_count} interrupted {src}")
+        keep = {str(d["_id"]) for d in self.db.trainings.find({"status": "train_queued"}, {"_id": 1})}
         if WORK.is_dir():
-            shutil.rmtree(WORK, ignore_errors=True)
+            for child in WORK.iterdir():
+                if child.name not in keep:
+                    shutil.rmtree(child, ignore_errors=True)
+
+    def retry_or_fail(self, t: dict[str, Any], phase: str, reason: str, error: str) -> bool:
+        """Re-queue after a crash/stall; returns False once attempts are used up."""
+        tid = t["_id"]
+        key = f"{phase}_attempts"
+        attempts = int(self.db.trainings.find_one({"_id": tid}, {key: 1}).get(key) or 0) + 1
+        if attempts >= MAX_ATTEMPTS:
+            label = "Dataset build" if phase == "dataset" else "Training"
+            self.finish(tid, "failed", f"{label} failed after {attempts} attempts: {reason}", error=error[:1500])
+            return False
+        queued = "dataset_queued" if phase == "dataset" else "train_queued"
+        resume = "continuing from the last finished shot" if phase == "dataset" else "resuming from the last saved epoch"
+        self.update(tid, status=queued, **{key: attempts}, last_error=error[:1500])
+        doc = self.db.trainings.find_one({"_id": tid}, {"progress": 1}) or {}
+        self.progress(
+            tid,
+            phase,
+            (doc.get("progress") or {}).get("done", 0),
+            (doc.get("progress") or {}).get("total", 0),
+            f"{reason} — {resume} (retry {attempts} of {MAX_ATTEMPTS - 1}).",
+        )
+        log(f"training {tid}: {reason}; retry {attempts}")
+        time.sleep(30)
+        return True
 
     # ---------- dataset ----------
 
@@ -170,9 +265,34 @@ class Worker:
         try:
             asyncio.run(self._build_dataset(t))
         except Exception as exc:
-            self.finish(tid, "failed", "Dataset build failed.", error=str(exc)[:500])
+            self.retry_or_fail(t, "dataset", "Dataset build crashed", repr(exc))
         finally:
             self.current = None
+
+    def drop_unusable_shots(self, t: dict[str, Any]) -> list[str]:
+        """Kontext sometimes returns the hero unchanged or two near-identical shots."""
+        stid = str(t["_id"])
+        imgs = list(self.db.training_images.find({"training_id": stid}).sort("idx", 1))
+
+        def small(img: dict[str, Any]) -> Image.Image:
+            raw = self.fs.open_download_stream(img["gridfs_id"]).read()
+            return Image.open(io.BytesIO(raw)).convert("L").resize((64, 64))
+
+        def diff(a: Image.Image, b: Image.Image) -> float:
+            pa, pb = a.getdata(), b.getdata()
+            return sum(abs(x - y) for x, y in zip(pa, pb)) / (64 * 64)
+
+        kept: list[tuple[dict[str, Any], Image.Image]] = []
+        dropped: list[str] = []
+        for img in imgs:
+            thumb = small(img)
+            if img.get("kind") != "hero" and any(diff(thumb, k) < UNCHANGED_DIFF for _, k in kept):
+                self.fs.delete(img["gridfs_id"])
+                self.db.training_images.delete_one({"_id": img["_id"]})
+                dropped.append(img["caption"].split(", ", 1)[-1])
+                continue
+            kept.append((img, thumb))
+        return dropped
 
     async def _build_dataset(self, t: dict[str, Any]) -> None:
         tid = t["_id"]
@@ -236,7 +356,16 @@ class Worker:
                 }
             )
             self.update(tid, warnings=warnings)
+        if t.get("auto_start"):
+            dropped = self.drop_unusable_shots(t)
+            if dropped:
+                warnings.append(f"auto-removed {len(dropped)} unchanged/duplicate shots: {'; '.join(dropped)}")
         n = self.db.training_images.count_documents({"training_id": stid})
+        if t.get("auto_start") and n >= T.MIN_IMAGES:
+            self.update(tid, status="train_queued", warnings=warnings)
+            self.progress(tid, "train", 0, 0, f"{n} shots ready — training starts automatically.")
+            log(f"dataset {tid} ready with {n} shots; auto-starting training")
+            return
         self.update(tid, status="review", warnings=warnings)
         self.progress(tid, "dataset", total, total, f"{n} shots ready — remove any where her face drifted, then start training.")
         log(f"dataset {tid} ready with {n} shots")
@@ -259,10 +388,12 @@ class Worker:
         try:
             self._train(t, work)
         except Exception as exc:
-            self.finish(tid, "failed", "Training failed.", error=str(exc)[:800])
+            self.retry_or_fail(t, "train", "Training crashed", repr(exc))
         finally:
-            shutil.rmtree(work, ignore_errors=True)
             self.current = None
+            doc = self.db.trainings.find_one({"_id": tid}, {"status": 1}) or {}
+            if doc.get("status") != "train_queued":
+                shutil.rmtree(work, ignore_errors=True)
 
     def _train(self, t: dict[str, Any], work: Path) -> None:
         tid = t["_id"]
@@ -289,10 +420,20 @@ class Worker:
         images = list(self.db.training_images.find({"training_id": stid}).sort("idx", 1))
         for img in images:
             ext = ".png" if "png" in (img.get("content_type") or "") else ".jpg"
-            (img_dir / f"{img['idx']:03d}{ext}").write_bytes(self.fs.open_download_stream(img["gridfs_id"]).read())
+            path = img_dir / f"{img['idx']:03d}{ext}"
+            if not path.is_file():
+                path.write_bytes(self.fs.open_download_stream(img["gridfs_id"]).read())
             (img_dir / f"{img['idx']:03d}.txt").write_text(img["caption"], encoding="utf-8")
-        total = len(images) * T.REPEATS * T.EPOCHS
-        self.progress(tid, "train", 0, total, "Loading Flux for training…")
+        per_epoch = len(images) * T.REPEATS
+        total = per_epoch * T.EPOCHS
+        out_dir = work / "out"
+        out_name = f"char_{slug}_v1"
+        state_dir, done_epochs = latest_state(out_dir, out_name)
+        offset = done_epochs * per_epoch
+        if state_dir:
+            self.progress(tid, "train", offset, total, f"Resuming after epoch {done_epochs} of {T.EPOCHS}…")
+        else:
+            self.progress(tid, "train", 0, total, "Loading Flux for training…")
 
         toml = work / "dataset.toml"
         toml.write_text(
@@ -317,62 +458,46 @@ class Worker:
             ),
             encoding="utf-8",
         )
-        out_dir = work / "out"
-        out_name = f"char_{slug}_v1"
-        cmd = [
-            str(SD_SCRIPTS / "venv" / "Scripts" / "accelerate.exe"), "launch",
-            "--num_processes", "1", "--num_machines", "1", "--mixed_precision", "bf16",
-            "--dynamo_backend", "no", "--num_cpu_threads_per_process", "1",
-            "flux_train_network.py",
-            "--pretrained_model_name_or_path", str(MODELS / "flux1-dev.safetensors"),
-            "--clip_l", str(MODELS / "clip_l.safetensors"),
-            "--t5xxl", str(MODELS / "t5xxl_fp16.safetensors"),
-            "--ae", str(MODELS / "ae.safetensors"),
-            "--dataset_config", str(toml),
-            "--output_dir", str(out_dir), "--output_name", out_name,
-            "--save_model_as", "safetensors", "--save_precision", "bf16",
-            "--network_module", "networks.lora_flux",
-            "--network_dim", str(DIM), "--network_alpha", str(DIM),
-            "--network_train_unet_only",
-            "--optimizer_type", "adafactor",
-            "--optimizer_args", "relative_step=False", "scale_parameter=False", "warmup_init=False",
-            "--lr_scheduler", "constant_with_warmup", "--lr_warmup_steps", "100", "--max_grad_norm", "0.0",
-            "--learning_rate", str(LEARNING_RATE),
-            "--max_train_epochs", str(T.EPOCHS), "--save_every_n_epochs", str(T.EPOCHS),
-            "--mixed_precision", "bf16", "--fp8_base", "--sdpa", "--gradient_checkpointing",
-            "--blocks_to_swap", str(BLOCKS_TO_SWAP),
-            "--cache_latents", "--cache_latents_to_disk",
-            "--cache_text_encoder_outputs", "--cache_text_encoder_outputs_to_disk",
-            "--guidance_scale", "1.0", "--timestep_sampling", "shift", "--discrete_flow_shift", "3.1582",
-            "--model_prediction_type", "raw", "--loss_type", "l2",
-            "--max_data_loader_n_workers", "1", "--persistent_data_loader_workers",
-            "--seed", "42",
-        ]
-        env = {**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
-        log(f"training {tid} ({slug}): {len(images)} shots, {total} steps")
-        proc = subprocess.Popen(
-            cmd,
-            cwd=str(SD_SCRIPTS),
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            creationflags=subprocess.CREATE_NO_WINDOW,
-        )
+        log(f"training {tid} ({slug}): {len(images)} shots, {total} steps, resume epoch {done_epochs}")
+        self.update(tid, train_started_at=now())
+        proc = launch_sd_scripts(toml, out_dir, out_name, T.EPOCHS, state_dir)
+        lines: queue.Queue[Optional[str]] = queue.Queue()
+
+        def pump() -> None:
+            assert proc.stdout is not None
+            with open(work / "train.log", "a", encoding="utf-8") as f:
+                for raw in proc.stdout:
+                    f.write(raw)
+                    f.flush()
+                    lines.put(raw.rstrip())
+            lines.put(None)
+
+        threading.Thread(target=pump, daemon=True).start()
         tail: deque[str] = deque(maxlen=30)
         last_report = 0.0
-        latest: Optional[tuple[int, int]] = None
+        latest: Optional[int] = None
+        progress_at = time.time()
         started = time.time()
-        assert proc.stdout is not None
-        for line in proc.stdout:
-            line = line.rstrip()
+        stalled = False
+        while True:
+            try:
+                line = lines.get(timeout=20)
+            except queue.Empty:
+                line = ""
+            if line is None:
+                break
             if line:
                 tail.append(line)
-            m = STEP_RE.search(line)
-            if m:
-                latest = (int(m.group(1)), int(m.group(2)))
+                m = STEP_RE.search(line)
+                if m and int(m.group(1)) != latest:
+                    latest = int(m.group(1))
+                    progress_at = time.time()
+                elif latest is None:
+                    progress_at = time.time()
+            if time.time() - progress_at > STALL_SEC:
+                stalled = True
+                subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True)
+                break
             if time.time() - last_report < 20:
                 continue
             last_report = time.time()
@@ -382,16 +507,15 @@ class Worker:
                 self.finish(tid, "cancelled", "Cancelled.")
                 return
             if latest:
-                step, steps = latest
-                eta = ""
-                if step > 0:
-                    left = (time.time() - started) / step * (steps - step)
-                    eta = f" · about {int(left // 3600)}h {int(left % 3600 // 60)}m left"
-                self.progress(tid, "train", step, steps, f"Training step {step} of {steps}{eta}")
+                step = min(offset + latest, total)
+                left = (time.time() - started) / latest * (total - step)
+                eta = f" · about {int(left // 3600)}h {int(left % 3600 // 60)}m left"
+                self.progress(tid, "train", step, total, f"Training step {step} of {total} (epoch {step // per_epoch + 1} of {T.EPOCHS}){eta}")
         rc = proc.wait()
         lora = out_dir / f"{out_name}.safetensors"
-        if rc != 0 or not lora.is_file():
-            self.finish(tid, "failed", "Training failed.", error="\n".join(list(tail)[-12:])[:1500])
+        if stalled or rc != 0 or not lora.is_file():
+            reason = f"No training progress for {STALL_SEC // 60} minutes" if stalled else f"Trainer exited with code {rc}"
+            self.retry_or_fail(t, "train", reason, "\n".join(list(tail)[-12:]))
             return
 
         dest = COMFY_LORAS / lora.name
@@ -444,7 +568,6 @@ def main() -> int:
     try:
         msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
     except OSError:
-        log("another trainer worker is running — exit")
         return 0
     Worker().run()
     return 0
