@@ -1,7 +1,7 @@
 """Deep Civitai search for realistic Flux img2img LoRAs that fit Wan Studio.
 
 Reads civitai= from tokens&cmd. Never prints the token.
-Writes ranked report to tmp_test/civitai_deep_fit/.
+Writes ranked report to temp_assets/civitai_deep_fit/.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 TOKENS = REPO / "tokens&cmd"
-OUT = REPO / "tmp_test" / "civitai_deep_fit"
+OUT = REPO / "temp_assets" / "civitai_deep_fit"
 UA = "Mozilla/5.0 (compatible; WanStudioDeepFit/1.0)"
 
 # Project needs: photoreal Flux img2img, facial opaque gel / tongue concepts,

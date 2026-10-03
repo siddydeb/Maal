@@ -11,7 +11,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 TOKENS = REPO / "tokens&cmd"
-OUT = REPO / "tmp_test" / "civitai_deep_fit"
+OUT = REPO / "temp_assets" / "civitai_deep_fit"
 
 
 def token() -> str:

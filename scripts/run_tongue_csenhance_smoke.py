@@ -24,7 +24,7 @@ from PIL import Image
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
-OUT = REPO / "tmp_test" / "18000_pony_sd15_lora_smoke"
+OUT = REPO / "temp_assets" / "18000_pony_sd15_lora_smoke"
 IID = "6a8630fbbd8d7c30d36ddd6b"
 BATCH = "18000_pony_sd15_lora_smoke"
 

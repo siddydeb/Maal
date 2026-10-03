@@ -13,7 +13,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 TOKENS = REPO / "tokens&cmd"
 LORAS = Path(r"E:\Comfy-Desktop\ComfyUI-Shared\models\loras")
-OUT = REPO / "tmp_test" / "civitai_fit_search"
+OUT = REPO / "temp_assets" / "civitai_fit_search"
 UA = "Mozilla/5.0 (compatible; WanStudio/1.0)"
 
 # Explicit candidates we already know + user links

@@ -438,7 +438,9 @@ def _ffmpeg_first_frame_jpeg(video: bytes, max_w: int) -> Optional[bytes]:
     if not exe:
         return None
     max_w = max(64, min(int(max_w), 720))
-    with tempfile.TemporaryDirectory(prefix="wan_thumb_") as tmp:
+    from backend.local_media import temp_assets
+
+    with tempfile.TemporaryDirectory(prefix="wan_thumb_", dir=temp_assets("thumbs")) as tmp:
         src = Path(tmp) / "in.bin"
         dst = Path(tmp) / "out.jpg"
         src.write_bytes(video)

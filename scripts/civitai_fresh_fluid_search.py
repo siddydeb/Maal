@@ -17,7 +17,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 TOKENS = REPO / "tokens&cmd"
-OUT = REPO / "tmp_test" / "civitai_fresh_fluid"
+OUT = REPO / "temp_assets" / "civitai_fresh_fluid"
 UA = "Mozilla/5.0 (compatible; WanFreshFluid/2.0)"
 
 QUERIES = [

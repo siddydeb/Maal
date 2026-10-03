@@ -3,7 +3,7 @@
 Writes:
   - Mongo generations for owner=utester, meta.preset_id=enhance_boobs, meta.test_run=True
     (visible in the app under PIN 18000 → Boobs / library)
-  - Side-by-side local copies under tmp_test/18000_front_enhance/ for approve browsing
+  - Side-by-side local copies under temp_assets/18000_front_enhance/ for approve browsing
 
 Usage (repo root, Comfy up):
   python scripts/run_front_enhance_batch.py
@@ -22,7 +22,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
-OUT = REPO / "tmp_test" / "18000_front_enhance"
+OUT = REPO / "temp_assets" / "18000_front_enhance"
 PRESET = "enhance_boobs"
 
 

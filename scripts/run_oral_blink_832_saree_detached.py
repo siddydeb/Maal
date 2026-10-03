@@ -2,7 +2,7 @@
 
 Env:
   ORAL_SECONDS   video length (default 5)
-  ORAL_OUT_TAG   folder suffix under tmp_test (default blink_dr34_{N}s_v2)
+  ORAL_OUT_TAG   folder suffix under temp_assets (default blink_dr34_{N}s_v2)
   ORAL_SEED      seed (default 43)
 """
 
@@ -22,7 +22,7 @@ sys.path.insert(0, str(REPO))
 
 SECONDS = float(os.environ.get("ORAL_SECONDS", "5"))
 TAG = os.environ.get("ORAL_OUT_TAG", f"blink_dr34_{int(SECONDS) if SECONDS == int(SECONDS) else SECONDS}s_v2")
-OUT = REPO / "tmp_test" / f"18000_oral_vid_smoke_saree_{TAG}"
+OUT = REPO / "temp_assets" / f"18000_oral_vid_smoke_saree_{TAG}"
 LOG = OUT / "run.log"
 IID = "6a8630fbbd8d7c30d36ddd6b"
 PRESET = "oral"

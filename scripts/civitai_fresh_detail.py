@@ -13,7 +13,7 @@ TOK = re.search(
     r"(?im)^\s*civitai=(.+)$",
     (REPO / "tokens&cmd").read_text(encoding="utf-8", errors="ignore"),
 ).group(1).strip()
-OUT = REPO / "tmp_test" / "civitai_fresh_fluid"
+OUT = REPO / "temp_assets" / "civitai_fresh_fluid"
 IDS = [
     655732,  # Cum On Face FLUX
     858262,  # NFA

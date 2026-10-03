@@ -15,6 +15,8 @@ temp/
 tmp/
 tmp_test/
 temptest_assets/
+temp_assets/*
+!temp_assets/.gitkeep
 datasets/keep_outfit/checkpoints/
 datasets/keep_outfit/**/*.safetensors
 *.mp4

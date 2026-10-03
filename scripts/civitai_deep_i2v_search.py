@@ -4,7 +4,7 @@ Project fit: Wan 2.2 I2V 14B high/low dual-stage, realistic face retention,
 prefer pretrained all-in-one that does motion+anatomy without stacking hell.
 
 Reads civitai= from tokens&cmd. Never prints the token.
-Writes ranked report to tmp_test/civitai_deep_i2v/.
+Writes ranked report to temp_assets/civitai_deep_i2v/.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 TOKENS = REPO / "tokens&cmd"
-OUT = REPO / "tmp_test" / "civitai_deep_i2v"
+OUT = REPO / "temp_assets" / "civitai_deep_i2v"
 UA = "Mozilla/5.0 (compatible; WanStudioDeepI2V/1.0)"
 
 QUERIES = [

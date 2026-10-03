@@ -12,7 +12,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
-OUT = REPO / "tmp_test" / "18000_oral_vid_smoke"
+OUT = REPO / "temp_assets" / "18000_oral_vid_smoke"
 PRESET = "oral"
 
 

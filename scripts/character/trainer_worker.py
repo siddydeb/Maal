@@ -8,8 +8,8 @@ The work dir survives crashes so training resumes from the last saved epoch; a c
 stalled run is retried up to MAX_ATTEMPTS times.
 While training, the app's job queue pauses (backend.training.gpu_held_by_training_sync).
 
-Kept alive by scripts/wan_stack_watchdog.py and the WanTrainerKeepalive scheduled task
-(scripts/character/start_trainer_hidden.vbs); safe to run by hand:
+Kept alive by scripts/wan_stack_watchdog.py (heal loop) while the repo is unlocked;
+manual hidden start: scripts/character/start_trainer_hidden.vbs. Safe to run by hand:
   python scripts/character/trainer_worker.py
 """
 
@@ -46,12 +46,13 @@ sys.path.insert(0, str(REPO))
 from backend import training as T  # noqa: E402
 from backend.comfy_client import ComfyClient  # noqa: E402
 from backend.config import get_settings  # noqa: E402
+from backend.local_media import TEMP_ASSETS  # noqa: E402
 from backend.workflows_wan import KONTEXT_UNET  # noqa: E402
 
 ROOT = Path(r"E:\LoraTraining")
 SD_SCRIPTS = ROOT / "sd-scripts"
 MODELS = ROOT / "models"
-WORK = ROOT / "work"
+WORK = TEMP_ASSETS / "train"
 HEARTBEAT_FILE = ROOT / "trainer_worker.heartbeat"
 LOCK_FILE = ROOT / "trainer_worker.lock"
 COMFY_LORAS = Path(r"E:\Comfy-Desktop\ComfyUI-Shared\models\loras")

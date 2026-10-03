@@ -15,7 +15,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
-OUT = REPO / "tmp_test" / "18000_cumshot_img_smoke_saree"
+OUT = REPO / "temp_assets" / "18000_cumshot_img_smoke_saree"
 IID = "6a8630fbbd8d7c30d36ddd6b"
 PRESET = "cumshot_clothes"
 

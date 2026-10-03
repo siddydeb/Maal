@@ -1,4 +1,4 @@
-"""Download latest test-mode run + references into tmp_test, then wipe.
+"""Download latest test-mode run + references into temp_assets, then wipe.
 
 Uses the tester owner token from WAN_AUTH_SECRET (not the PIN).
 Media stays in Mongo; this folder is only for local visual review.
@@ -20,7 +20,7 @@ import urllib.request
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
-OUT = REPO / "tmp_test" / "review"
+OUT = REPO / "temp_assets" / "review"
 API = "https://wan-studio-api.onrender.com"
 
 sys.path.insert(0, str(REPO))
