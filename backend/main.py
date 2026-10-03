@@ -571,6 +571,7 @@ async def start_job(
     character: Optional[str] = Form(None),
     outfit: Optional[str] = Form(None),
     aspect: Optional[str] = Form(None),
+    engine: Optional[str] = Form(None),
     owner: str = Depends(require_owner),
 ):
     """
@@ -581,14 +582,20 @@ async def start_job(
     tap do not enqueue duplicate jobs.
 
     mode=t2i needs no image; character/outfit/aspect pick entries from t2i config.
+    engine: t2i "klein" | "flux"; img "klein" (keep-face edit) or empty for the standard engine.
     """
     prompt = (prompt or "").strip()
     if not prompt:
         raise HTTPException(400, "Prompt is required")
     if mode != "t2i" and image is None:
         raise HTTPException(400, "An image is required for this mode")
+    engine = (engine or "").strip().lower() or None
+    if engine not in (None, "klein", "flux", "standard"):
+        raise HTTPException(400, f"Unknown engine '{engine}'")
 
     t2i_options: dict = {}
+    if mode == "img" and engine == "klein":
+        t2i_options = {"engine": "klein"}
     if mode == "t2i":
         from backend import t2i as t2i_mod
 
@@ -596,6 +603,7 @@ async def start_job(
             "character": (character or "").strip() or None,
             "outfit": (outfit or "").strip() or None,
             "aspect": (aspect or "").strip() or None,
+            "engine": engine if engine in ("klein", "flux") else None,
         }
         try:
             t2i_mod.plan_t2i(prompt, cfg=t2i_mod.load_config(), installed=None, **t2i_options)
@@ -850,6 +858,7 @@ async def _execute_generation(
                     character_id=opts.get("character"),
                     outfit_id=opts.get("outfit"),
                     aspect=opts.get("aspect"),
+                    engine=opts.get("engine"),
                 )
             except t2i_mod.T2IError as exc:
                 raise HTTPException(400, str(exc)) from exc
@@ -857,6 +866,15 @@ async def _execute_generation(
             filename = f"wan_img_{uuid.uuid4().hex}.png"
             if "jpeg" in content_type or "jpg" in content_type:
                 filename = filename.replace(".png", ".jpg")
+        elif mode == "img" and (options or {}).get("engine") == "klein":
+            from backend import t2i as t2i_mod
+
+            assert image_bytes is not None
+            data, content_type, engine_meta = await t2i_mod.run_klein_edit(
+                client, image_bytes, prompt_en, seed=seed
+            )
+            kind = "img"
+            filename = f"wan_img_{uuid.uuid4().hex}.png"
         else:
             result = await ai_engine_run(
                 GenerateRequest(
@@ -1561,6 +1579,10 @@ async def media(
         raise HTTPException(404, "Not found")
     stream, length, content_type, filename = result
     disposition = "attachment" if int(download or 0) else "inline"
+    if disposition == "attachment":
+        # `npm run wipe` finds downloaded gens in ~/Downloads by this wan_ prefix.
+        kind = "vid" if (content_type or "").startswith("video/") else "img"
+        filename = f"wan_{kind}_{gen_id}{Path(filename or '').suffix or ('.mp4' if kind == 'vid' else '.png')}"
     headers = {
         **NO_STORE,
         "Content-Disposition": f'{disposition}; filename="{filename}"',

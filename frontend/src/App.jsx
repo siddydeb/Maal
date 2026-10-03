@@ -237,6 +237,8 @@ export default function App() {
   const [t2iOutfit, setT2iOutfit] = useState("");
   const [t2iAspect, setT2iAspect] = useState("");
   const [t2iSeed, setT2iSeed] = useState("");
+  const [t2iEngine, setT2iEngine] = useState("");
+  const [imgEngine, setImgEngine] = useState("standard");
 
   useEffect(() => {
     let cancelled = false;
@@ -252,6 +254,7 @@ export default function App() {
         if (!cancelled && cfg) {
           setT2iConfig(cfg);
           setT2iAspect((a) => a || cfg.default_aspect || "");
+          setT2iEngine((e) => e || cfg.default_engine || "");
         }
       } catch {
         /* text-to-image options unavailable */
@@ -757,6 +760,7 @@ export default function App() {
       pickFile(f);
       setResult(item);
       setMode("img");
+      if (item.meta?.mode === "t2i" && t2iConfig?.klein_ready) setImgEngine("klein");
       setPrompt("");
       setView("generation");
       setStatus(
@@ -927,6 +931,11 @@ export default function App() {
         t2i: isT2i
           ? { character: t2iCharacter, outfit: t2iOutfit, aspect: t2iAspect }
           : undefined,
+        engine: isT2i
+          ? t2iEngine || undefined
+          : genMode === "img" && imgEngine === "klein" && !presetId
+            ? "klein"
+            : undefined,
       });
       setLastPresetId(presetId || null);
       if (started?.id) saveActiveJobId(started.id, { mode: genMode });
@@ -1352,6 +1361,31 @@ export default function App() {
                         ))}
                       </select>
                     </label>
+                    {(t2iConfig?.engines || []).length > 1 && (
+                      <div className="t2i-field">
+                        <span>Model</span>
+                        <div className="duration">
+                          {t2iConfig.engines.map((en) => {
+                            const active = t2iCharacter ? en.id === "flux" : t2iEngine === en.id;
+                            return (
+                              <button
+                                key={en.id}
+                                type="button"
+                                className={`duration-btn${active ? " active" : ""}`}
+                                aria-pressed={active}
+                                disabled={!!t2iCharacter && en.id !== "flux"}
+                                onClick={() => setT2iEngine(en.id)}
+                              >
+                                {en.label}
+                              </button>
+                            );
+                          })}
+                        </div>
+                        {t2iCharacter && (
+                          <p className="setting-hint">Trained girls always use Flux Dev.</p>
+                        )}
+                      </div>
+                    )}
                     <label className="t2i-field">
                       <span>Outfit</span>
                       <select
@@ -1542,6 +1576,36 @@ export default function App() {
                       Reset
                     </button>
                   </div>
+
+                  {mode === "img" && (
+                    <div className="setting-row" role="group" aria-label="Edit engine">
+                      <div className="setting-label">
+                        <span>Edit engine</span>
+                        <span className="setting-hint">
+                          {imgEngine === "klein"
+                            ? "keeps her face · quick actions still use Standard"
+                            : "presets, NSFW edits"}
+                        </span>
+                      </div>
+                      <div className="duration">
+                        {[
+                          ["standard", "Standard"],
+                          ["klein", "Keep face"],
+                        ].map(([id, label]) => (
+                          <button
+                            key={id}
+                            type="button"
+                            className={`duration-btn${imgEngine === id ? " active" : ""}`}
+                            aria-pressed={imgEngine === id}
+                            disabled={id === "klein" && t2iConfig && !t2iConfig.klein_ready}
+                            onClick={() => setImgEngine(id)}
+                          >
+                            {label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
 
                   {mode === "vid" && (
                     <div

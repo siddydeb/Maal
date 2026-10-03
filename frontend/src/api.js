@@ -359,6 +359,7 @@ export async function startJob({
   attempts = 3,
   clientKey,
   t2i,
+  engine,
 }) {
   // One key for this tap — retries must not create extra queue entries.
   const idem =
@@ -377,6 +378,7 @@ export async function startJob({
       if (t2i.outfit) body.append("outfit", t2i.outfit);
       if (t2i.aspect) body.append("aspect", t2i.aspect);
     }
+    if (engine) body.append("engine", engine);
     body.append("client_key", idem);
     if (negative) body.append("negative", negative);
     if (seed != null && seed !== "") body.append("seed", String(seed));

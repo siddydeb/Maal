@@ -15,6 +15,7 @@ OUR_PREFIXES = (
     "wan_i2v14",
     "flux_i2i",
     "flux_kontext",
+    "wan_klein",
     "ComfyUI_temp",
 )
 

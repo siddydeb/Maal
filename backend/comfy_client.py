@@ -296,6 +296,48 @@ class ComfyClient:
         )
         return data, ctype, seed
 
+    async def generate_klein(
+        self,
+        prompt: str,
+        *,
+        width: int,
+        height: int,
+        seed: Optional[int] = None,
+        steps: int = 4,
+        unet: Optional[str] = None,
+        clip: Optional[str] = None,
+        vae: Optional[str] = None,
+        loras: Optional[list[tuple[str, float]]] = None,
+        image_bytes: Optional[bytes] = None,
+    ) -> tuple[bytes, str, int]:
+        """FLUX.2 Klein text-to-image, or reference edit when image_bytes is given.
+        Returns (bytes, content_type, seed_used)."""
+        from backend import workflows_klein as wk
+
+        seed = seed if seed is not None else random.randint(0, 2**32 - 1)
+        image_name = await self._upload_image(image_bytes) if image_bytes else None
+        try:
+            workflow = wk.build_klein_prompt(
+                positive=prompt,
+                width=width,
+                height=height,
+                seed=seed,
+                steps=steps,
+                unet=unet or wk.KLEIN_UNET,
+                clip=clip or wk.KLEIN_CLIP,
+                vae=vae or wk.KLEIN_VAE,
+                loras=loras,
+                ref_image_name=image_name,
+            )
+            data, ctype = await self._run_and_fetch(
+                workflow, prefer=("images",), input_name=image_name
+            )
+        except Exception:
+            if image_name:
+                await self._full_scrub(input_name=image_name)
+            raise
+        return data, ctype, seed
+
     async def lora_names(self) -> set[str]:
         """LoRA filenames the remote ComfyUI can load (LoraLoader menu)."""
         async with httpx.AsyncClient(timeout=20.0) as client:

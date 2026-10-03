@@ -5,10 +5,12 @@ from __future__ import annotations
 import unittest
 
 from backend import t2i
+from backend.workflows_klein import build_klein_prompt, edit_size
 from backend.workflows_wan import build_t2i_prompt
 
 CFG = {
     **t2i._DEFAULTS,
+    "engine": "flux",
     "aspects": {
         "portrait": {"label": "2:3", "size": [832, 1216]},
         "square": {"label": "1:1", "size": [1024, 1024]},
@@ -67,6 +69,60 @@ class T2IPlanTests(unittest.TestCase):
         self.assertEqual(pub["characters"], [{"id": "zara", "name": "Zara", "installed": False}])
         self.assertTrue(pub["realism_ready"])
         self.assertNotIn("safetensors", str(pub))
+        self.assertEqual(pub["default_engine"], "flux")
+        self.assertFalse(pub["klein_ready"])
+
+
+class KleinPlanTests(unittest.TestCase):
+    KCFG = {**CFG, "engine": "klein"}
+
+    def test_klein_skips_flux_realism_loras(self) -> None:
+        p = t2i.plan_t2i("woman in a cafe", cfg=self.KCFG, installed=None)
+        self.assertEqual(p.engine, "klein")
+        self.assertEqual(p.loras, [])
+        self.assertNotIn("amateurish photo", p.prompt)
+        self.assertTrue(p.prompt.endswith("Phone photo."))
+
+    def test_engine_override_and_character_forces_flux(self) -> None:
+        self.assertEqual(t2i.plan_t2i("x", cfg=CFG, installed=None, engine="klein").engine, "klein")
+        p = t2i.plan_t2i("x", cfg=self.KCFG, installed=None, character_id="zara")
+        self.assertEqual(p.engine, "flux")
+        self.assertEqual(p.loras[0][0], "char_zara_v1.safetensors")
+        self.assertEqual(t2i.resolve_engine(self.KCFG, "bogus", None), "flux")
+
+    def test_edit_prompt_appends_keep_face_once(self) -> None:
+        out = t2i.edit_prompt("change her top to a red saree", self.KCFG)
+        self.assertTrue(out.startswith("change her top to a red saree."))
+        self.assertIn("identity exactly the same", out)
+        kept = "Beach dress, keep her face the same"
+        self.assertEqual(t2i.edit_prompt(kept, self.KCFG), kept)
+
+
+class KleinGraphTests(unittest.TestCase):
+    def test_edit_graph_has_reference_latent_and_gguf(self) -> None:
+        g = build_klein_prompt(
+            positive="a woman", width=832, height=1216, seed=3,
+            loras=[("klein_consistency_v2.safetensors", 0.8)], ref_image_name="in.png",
+        )
+        types = [n["class_type"] for n in g.values()]
+        self.assertEqual(g["1"]["class_type"], "UnetLoaderGGUF")
+        self.assertIn("ReferenceLatent", types)
+        self.assertIn("LoraLoaderModelOnly", types)
+        self.assertEqual(g["7"]["inputs"]["positive"], ["33", 0])
+        self.assertEqual(g["7"]["inputs"]["model"], ["20", 0])
+        self.assertEqual(g["9"]["inputs"]["steps"], 4)
+
+    def test_t2i_graph_has_no_image(self) -> None:
+        g = build_klein_prompt(positive="a woman", width=832, height=1216, seed=3)
+        types = [n["class_type"] for n in g.values()]
+        self.assertNotIn("LoadImage", types)
+        self.assertEqual(g["7"]["inputs"]["positive"], ["5", 0])
+
+    def test_edit_size_keeps_aspect_at_1mp(self) -> None:
+        w, h = edit_size(832, 1216)
+        self.assertEqual((w % 16, h % 16), (0, 0))
+        self.assertAlmostEqual(w / h, 832 / 1216, places=1)
+        self.assertLessEqual(w * h, 1024 * 1024)
 
 
 class T2IGraphTests(unittest.TestCase):
