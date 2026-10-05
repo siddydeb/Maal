@@ -319,6 +319,28 @@ async def mark_generation_opened(
     return await get_generation(gen_id, owner=owner)
 
 
+async def set_generation_locked(
+    gen_id: str, *, locked: bool, owner: Optional[str] = None
+) -> Optional[dict[str, Any]]:
+    """Set or clear meta.locked (library 'interested' lock) without wiping other meta."""
+    try:
+        oid = ObjectId(gen_id)
+    except Exception:
+        return None
+    query: dict[str, Any] = {"_id": oid}
+    if owner:
+        query["owner"] = owner
+    now = datetime.now(timezone.utc)
+    if locked:
+        update = {"$set": {"meta.locked": True, "meta.locked_at": now, "updated_at": now}}
+    else:
+        update = {"$unset": {"meta.locked": "", "meta.locked_at": ""}, "$set": {"updated_at": now}}
+    result = await db().generations.update_one(query, update)
+    if result.matched_count == 0:
+        return None
+    return await get_generation(gen_id, owner=owner)
+
+
 async def set_review_bin(
     gen_id: str, *, owner: str, bin_id: Optional[str]
 ) -> Optional[dict[str, Any]]:

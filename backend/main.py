@@ -46,6 +46,10 @@ class GenerationUpdate(BaseModel):
     meta: Optional[dict] = None
 
 
+class LockBody(BaseModel):
+    locked: bool
+
+
 class UnlockBody(BaseModel):
     pin: str = Field(..., min_length=1, max_length=16)
 
@@ -1213,8 +1217,22 @@ async def generation_opened(gen_id: str, owner: str = Depends(require_owner)):
     return _json(doc)
 
 
+@app.post("/api/generations/{gen_id}/lock")
+async def generation_lock(
+    gen_id: str, body: LockBody, owner: str = Depends(require_owner)
+):
+    """Lock (mark as interested) or unlock a library item. Locked items can't be deleted."""
+    doc = await db.set_generation_locked(gen_id, locked=body.locked, owner=owner)
+    if not doc:
+        raise HTTPException(404, "Not found")
+    return _json(doc)
+
+
 @app.delete("/api/generations/{gen_id}")
 async def generation_delete(gen_id: str, owner: str = Depends(require_owner)):
+    existing = await db.get_generation(gen_id, owner=owner)
+    if existing and (existing.get("meta") or {}).get("locked"):
+        raise HTTPException(409, "This item is locked. Unlock it before deleting.")
     ok = await db.delete_generation(gen_id, owner=owner)
     if not ok:
         raise HTTPException(404, "Not found")

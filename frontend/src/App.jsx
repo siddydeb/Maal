@@ -26,6 +26,7 @@ import {
   waitForJob,
   updateGeneration,
   markGenerationOpened,
+  setGenerationLocked,
   listTestRefs,
   testRefThumbUrl,
   getEta,
@@ -221,6 +222,7 @@ export default function App() {
   const wakeLockRef = useRef(null);
   const pollAbortRef = useRef(null);
   const touchStartRef = useRef(null);
+  const holdRef = useRef({ timer: null, x: 0, y: 0, fired: false });
   const [installHint, setInstallHint] = useState(false);
   const [admin, setAdmin] = useState(() => isAdminOwner());
   const [tester, setTester] = useState(() => isTesterOwner());
@@ -778,6 +780,59 @@ export default function App() {
       setBusyId(null);
       setUsingAsInput(false);
     }
+  }
+
+  function applyLocked(id, locked) {
+    const patch = (row) => {
+      const meta = { ...(row.meta || {}) };
+      if (locked) meta.locked = true;
+      else delete meta.locked;
+      return { ...row, meta };
+    };
+    setLibrary((prev) => prev.map((row) => (row.id === id ? patch(row) : row)));
+    setLightbox((cur) => (cur?.id === id ? patch(cur) : cur));
+  }
+
+  async function toggleLock(item) {
+    if (!item?.id) return;
+    const next = !item?.meta?.locked;
+    applyLocked(item.id, next);
+    navigator.vibrate?.(30);
+    try {
+      await setGenerationLocked(item.id, next);
+      setStatusError(false);
+      setStatus(next ? "Locked — marked as interested." : "Unlocked.");
+    } catch (err) {
+      applyLocked(item.id, !next);
+      const s = statusFromErr(err);
+      setStatus(s.text);
+      setStatusError(s.error);
+    }
+  }
+
+  function cancelHold() {
+    clearTimeout(holdRef.current.timer);
+    holdRef.current.timer = null;
+  }
+
+  function startHold(e, item) {
+    if (e.button != null && e.button !== 0) return;
+    cancelHold();
+    holdRef.current = {
+      x: e.clientX,
+      y: e.clientY,
+      fired: false,
+      timer: setTimeout(() => {
+        holdRef.current.fired = true;
+        holdRef.current.timer = null;
+        toggleLock(item);
+      }, 500),
+    };
+  }
+
+  function moveHold(e) {
+    const h = holdRef.current;
+    if (h.timer && Math.hypot(e.clientX - h.x, e.clientY - h.y) > 10) cancelHold();
   }
 
   function selectItem(item) {
@@ -2002,16 +2057,29 @@ export default function App() {
                   item.kind === "vid" ||
                   (item.content_type || "").startsWith("video/");
                 const isRecent = !item?.meta?.opened_at;
+                const isLocked = !!item?.meta?.locked;
                 return (
                   <li
                     key={item.id}
-                    className={`gallery-item${isRecent ? " is-recent" : ""}`}
+                    className={`gallery-item${isRecent ? " is-recent" : ""}${isLocked ? " is-locked" : ""}`}
                   >
                     <button
                       type="button"
                       className="gallery-cell"
-                      title={isVid ? "View video" : "View photo"}
-                      onClick={() => selectItem(item)}
+                      title={`${isVid ? "View video" : "View photo"} · hold to ${isLocked ? "unlock" : "lock"}`}
+                      onPointerDown={(e) => startHold(e, item)}
+                      onPointerMove={moveHold}
+                      onPointerUp={cancelHold}
+                      onPointerLeave={cancelHold}
+                      onPointerCancel={cancelHold}
+                      onContextMenu={(e) => e.preventDefault()}
+                      onClick={() => {
+                        if (holdRef.current.fired) {
+                          holdRef.current.fired = false;
+                          return;
+                        }
+                        selectItem(item);
+                      }}
                     >
                       {isVid ? (
                         <span className="gallery-thumb gallery-thumb-video">
@@ -2039,6 +2107,9 @@ export default function App() {
                         />
                       )}
                       <span className="gallery-kind">{item.kind}</span>
+                      {isLocked && (
+                        <span className="gallery-lock" aria-label="Locked">🔒</span>
+                      )}
                       {isRecent && (
                         <span className="gallery-recent-tag">Recently generated</span>
                       )}
@@ -2053,15 +2124,17 @@ export default function App() {
                       >
                         ↓
                       </button>
-                      <button
-                        type="button"
-                        className="gallery-act danger"
-                        title="Delete"
-                        disabled={busyId === item.id}
-                        onClick={() => onDelete(item.id)}
-                      >
-                        ×
-                      </button>
+                      {!isLocked && (
+                        <button
+                          type="button"
+                          className="gallery-act danger"
+                          title="Delete"
+                          disabled={busyId === item.id}
+                          onClick={() => onDelete(item.id)}
+                        >
+                          ×
+                        </button>
+                      )}
                     </div>
                   </li>
                 );

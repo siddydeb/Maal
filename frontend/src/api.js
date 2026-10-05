@@ -306,6 +306,15 @@ export async function markGenerationOpened(id) {
   return readJson(res);
 }
 
+export async function setGenerationLocked(id, locked) {
+  const res = await fetch(url(`/api/generations/${encodeURIComponent(id)}/lock`), {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ locked: !!locked }),
+  });
+  return readJson(res);
+}
+
 export async function deleteGeneration(id) {
   const res = await fetch(url(`/api/generations/${id}`), {
     method: "DELETE",
