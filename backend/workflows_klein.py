@@ -25,8 +25,11 @@ def build_klein_prompt(
     vae: str = KLEIN_VAE,
     loras: Optional[list[tuple[str, float]]] = None,
     ref_image_name: Optional[str] = None,
+    face_fix: Optional[dict[str, Any]] = None,
     filename_prefix: str = "wan_klein",
 ) -> dict[str, Any]:
+    """``face_fix`` ({"prompt", "denoise", "steps"}) re-renders the detected face at full
+    resolution with the same model, LoRAs and reference, then pastes it back (Impact FaceDetailer)."""
     loader = "UnetLoaderGGUF" if unet.endswith(".gguf") else "UNETLoader"
     unet_inputs: dict[str, Any] = {"unet_name": unet}
     if loader == "UNETLoader":
@@ -71,7 +74,51 @@ def build_klein_prompt(
         "13": {"class_type": "VAEDecode", "inputs": {"samples": ["12", 0], "vae": ["3", 0]}},
         "14": {"class_type": "SaveImage", "inputs": {"images": ["13", 0], "filename_prefix": filename_prefix}},
     })
+    if face_fix is not None:
+        _add_face_fix(g, model=model, seed=seed, ref_latent=["32", 0] if ref_image_name else None, **face_fix)
     return g
+
+
+def _add_face_fix(
+    g: dict[str, Any],
+    *,
+    model: list[Any],
+    seed: int,
+    ref_latent: Optional[list[Any]],
+    prompt: str,
+    denoise: float = 0.5,
+    steps: int = 8,
+    detector: str = "bbox/face_yolov8m.pt",
+) -> None:
+    g["50"] = {"class_type": "UltralyticsDetectorProvider", "inputs": {"model_name": detector}}
+    g["51"] = {"class_type": "CLIPTextEncode", "inputs": {"text": prompt, "clip": ["2", 0]}}
+    pos: list[Any] = ["51", 0]
+    if ref_latent:
+        g["52"] = {"class_type": "ReferenceLatent", "inputs": {"conditioning": pos, "latent": ref_latent}}
+        pos = ["52", 0]
+    g["53"] = {
+        "class_type": "BboxDetectorSEGS",
+        "inputs": {
+            "bbox_detector": ["50", 0], "image": ["13", 0], "threshold": 0.5,
+            "dilation": 16, "crop_factor": 2.2, "drop_size": 24, "labels": "all",
+        },
+    }
+    # Only the largest face is hers; background people keep their own faces.
+    g["54"] = {
+        "class_type": "ImpactSEGSOrderedFilter",
+        "inputs": {"segs": ["53", 0], "target": "area(=w*h)", "order": True, "take_start": 0, "take_count": 1},
+    }
+    g["55"] = {
+        "class_type": "DetailerForEach",
+        "inputs": {
+            "image": ["13", 0], "segs": ["54", 0], "model": model, "clip": ["2", 0], "vae": ["3", 0],
+            "guide_size": 1024, "guide_size_for": True, "max_size": 1024,
+            "seed": seed, "steps": int(steps), "cfg": 1.0, "sampler_name": "euler", "scheduler": "simple",
+            "positive": pos, "negative": ["6", 0], "denoise": float(denoise),
+            "feather": 12, "noise_mask": True, "force_inpaint": True, "wildcard": "", "cycle": 1,
+        },
+    }
+    g["14"]["inputs"]["images"] = ["55", 0]
 
 
 def edit_size(width: int, height: int, megapixels: float = 1.0) -> tuple[int, int]:

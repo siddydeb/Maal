@@ -66,7 +66,10 @@ class T2IPlanTests(unittest.TestCase):
 
     def test_public_config_hides_filenames(self) -> None:
         pub = t2i.public_config(CFG, {"real.safetensors", "sameface.safetensors"})
-        self.assertEqual(pub["characters"], [{"id": "zara", "name": "Zara", "installed": False}])
+        self.assertEqual(
+            pub["characters"],
+            [{"id": "zara", "name": "Zara", "installed": False, "engine": "flux", "face_fix": False}],
+        )
         self.assertTrue(pub["realism_ready"])
         self.assertNotIn("safetensors", str(pub))
         self.assertEqual(pub["default_engine"], "flux")
@@ -89,6 +92,28 @@ class KleinPlanTests(unittest.TestCase):
         self.assertEqual(p.engine, "flux")
         self.assertEqual(p.loras[0][0], "char_zara_v1.safetensors")
         self.assertEqual(t2i.resolve_engine(self.KCFG, "bogus", None), "flux")
+
+    KAVYA = {
+        "id": "kavya", "name": "Kavya", "lora": "kavya_klein.safetensors", "strength": 0.8,
+        "trigger": "kavya woman", "engine": "klein", "ref_gridfs_id": "abc123", "face_fix": True,
+        "loras": [{"file": "klein_real.safetensors", "strength": 0.6}], "suffix": "Candid phone photo.",
+    }
+
+    def test_klein_character_uses_klein_with_ref_and_face_fix(self) -> None:
+        cfg = {**CFG, "characters": CFG["characters"] + [self.KAVYA]}
+        p = t2i.plan_t2i("walking on a beach", cfg=cfg, installed=None, character_id="kavya")
+        self.assertEqual(p.engine, "klein")
+        self.assertEqual([l[0] for l in p.loras], ["kavya_klein.safetensors", "klein_real.safetensors"])
+        self.assertEqual(p.loras[0][1], 0.8)
+        self.assertTrue(p.prompt.startswith("kavya woman, walking on a beach. Candid phone photo."))
+        self.assertEqual(p.ref_gridfs_id, "abc123")
+        self.assertIn("kavya woman", p.face_fix["prompt"])
+        off = t2i.plan_t2i("x", cfg=cfg, installed=None, character_id="kavya", face_fix=False)
+        self.assertIsNone(off.face_fix)
+        self.assertEqual(off.ref_gridfs_id, "abc123")
+        pub = t2i.public_config(cfg, None)["characters"][1]
+        self.assertEqual((pub["engine"], pub["face_fix"]), ("klein", True))
+        self.assertNotIn("abc123", str(t2i.public_config(cfg, None)))
 
     def test_edit_prompt_appends_keep_face_once(self) -> None:
         out = t2i.edit_prompt("change her top to a red saree", self.KCFG)
@@ -117,6 +142,19 @@ class KleinGraphTests(unittest.TestCase):
         types = [n["class_type"] for n in g.values()]
         self.assertNotIn("LoadImage", types)
         self.assertEqual(g["7"]["inputs"]["positive"], ["5", 0])
+
+    def test_face_fix_details_only_largest_face_with_reference(self) -> None:
+        g = build_klein_prompt(
+            positive="a woman", width=832, height=1216, seed=3, ref_image_name="in.png",
+            face_fix={"prompt": "her face", "denoise": 0.4, "steps": 8},
+        )
+        self.assertEqual(g["54"]["inputs"]["take_count"], 1)
+        self.assertEqual(g["55"]["class_type"], "DetailerForEach")
+        self.assertEqual(g["55"]["inputs"]["positive"], ["52", 0])
+        self.assertEqual(g["52"]["inputs"]["latent"], ["32", 0])
+        self.assertEqual(g["14"]["inputs"]["images"], ["55", 0])
+        plain = build_klein_prompt(positive="a woman", width=832, height=1216, seed=3)
+        self.assertEqual(plain["14"]["inputs"]["images"], ["13", 0])
 
     def test_edit_size_keeps_aspect_at_1mp(self) -> None:
         w, h = edit_size(832, 1216)

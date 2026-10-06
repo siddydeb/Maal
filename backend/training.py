@@ -282,13 +282,17 @@ def list_characters_sync() -> list[dict[str, Any]]:
     """Trained girls in t2i character format."""
     out = []
     for c in db._sync_db().characters.find({}).sort("created_at", 1):
-        out.append(
-            {
-                "id": c["slug"],
-                "name": c.get("name") or c["slug"],
-                "lora": c["lora"],
-                "trigger": c.get("trigger") or f"{c['slug']}_v1 woman",
-                "strength": float(c.get("strength", 1.0)),
-            }
-        )
+        entry = {
+            "id": c["slug"],
+            "name": c.get("name") or c["slug"],
+            "lora": c["lora"],
+            "trigger": c.get("trigger") or f"{c['slug']}_v1 woman",
+            "strength": float(c.get("strength", 1.0)),
+        }
+        for key in ("engine", "loras", "suffix", "face_fix"):
+            if c.get(key) is not None:
+                entry[key] = c[key]
+        if c.get("ref_gridfs_id"):
+            entry["ref_gridfs_id"] = str(c["ref_gridfs_id"])
+        out.append(entry)
     return out

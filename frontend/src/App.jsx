@@ -240,7 +240,10 @@ export default function App() {
   const [t2iAspect, setT2iAspect] = useState("");
   const [t2iSeed, setT2iSeed] = useState("");
   const [t2iEngine, setT2iEngine] = useState("");
+  const [t2iFaceFix, setT2iFaceFix] = useState(true);
   const [imgEngine, setImgEngine] = useState("standard");
+  const t2iGirl = (t2iConfig?.characters || []).find((c) => c.id === t2iCharacter) || null;
+  const t2iGirlEngine = t2iGirl ? t2iGirl.engine || "flux" : null;
 
   useEffect(() => {
     let cancelled = false;
@@ -984,7 +987,12 @@ export default function App() {
         presetId: presetId || undefined,
         testRun: tester,
         t2i: isT2i
-          ? { character: t2iCharacter, outfit: t2iOutfit, aspect: t2iAspect }
+          ? {
+              character: t2iCharacter,
+              outfit: t2iOutfit,
+              aspect: t2iAspect,
+              faceFix: t2iGirl?.face_fix ? t2iFaceFix : undefined,
+            }
           : undefined,
         engine: isT2i
           ? t2iEngine || undefined
@@ -1421,14 +1429,14 @@ export default function App() {
                         <span>Model</span>
                         <div className="duration">
                           {t2iConfig.engines.map((en) => {
-                            const active = t2iCharacter ? en.id === "flux" : t2iEngine === en.id;
+                            const active = t2iGirlEngine ? en.id === t2iGirlEngine : t2iEngine === en.id;
                             return (
                               <button
                                 key={en.id}
                                 type="button"
                                 className={`duration-btn${active ? " active" : ""}`}
                                 aria-pressed={active}
-                                disabled={!!t2iCharacter && en.id !== "flux"}
+                                disabled={!!t2iGirlEngine && en.id !== t2iGirlEngine}
                                 onClick={() => setT2iEngine(en.id)}
                               >
                                 {en.label}
@@ -1436,9 +1444,38 @@ export default function App() {
                             );
                           })}
                         </div>
-                        {t2iCharacter && (
-                          <p className="setting-hint">Trained girls always use Flux Dev.</p>
+                        {t2iGirl && (
+                          <p className="setting-hint">
+                            {t2iGirl.name} always uses{" "}
+                            {(t2iConfig.engines.find((en) => en.id === t2iGirlEngine) || {}).label ||
+                              t2iGirlEngine}
+                            .
+                          </p>
                         )}
+                      </div>
+                    )}
+                    {t2iGirl?.face_fix && (
+                      <div className="t2i-field">
+                        <span>Fix face</span>
+                        <div className="duration">
+                          {[
+                            [true, "On"],
+                            [false, "Off"],
+                          ].map(([val, label]) => (
+                            <button
+                              key={label}
+                              type="button"
+                              className={`duration-btn${t2iFaceFix === val ? " active" : ""}`}
+                              aria-pressed={t2iFaceFix === val}
+                              onClick={() => setT2iFaceFix(val)}
+                            >
+                              {label}
+                            </button>
+                          ))}
+                        </div>
+                        <p className="setting-hint">
+                          Redraws her face sharply. Best for full-body shots; adds ~30s.
+                        </p>
                       </div>
                     )}
                     <label className="t2i-field">

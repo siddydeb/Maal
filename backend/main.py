@@ -576,6 +576,7 @@ async def start_job(
     outfit: Optional[str] = Form(None),
     aspect: Optional[str] = Form(None),
     engine: Optional[str] = Form(None),
+    face_fix: Optional[str] = Form(None),
     owner: str = Depends(require_owner),
 ):
     """
@@ -587,6 +588,7 @@ async def start_job(
 
     mode=t2i needs no image; character/outfit/aspect pick entries from t2i config.
     engine: t2i "klein" | "flux"; img "klein" (keep-face edit) or empty for the standard engine.
+    face_fix: "0" turns off a Klein character's face re-render (on by default).
     """
     prompt = (prompt or "").strip()
     if not prompt:
@@ -608,6 +610,7 @@ async def start_job(
             "outfit": (outfit or "").strip() or None,
             "aspect": (aspect or "").strip() or None,
             "engine": engine if engine in ("klein", "flux") else None,
+            "face_fix": False if (face_fix or "").strip().lower() in ("0", "false", "off") else None,
         }
         try:
             t2i_mod.plan_t2i(prompt, cfg=t2i_mod.load_config(), installed=None, **t2i_options)
@@ -863,6 +866,7 @@ async def _execute_generation(
                     outfit_id=opts.get("outfit"),
                     aspect=opts.get("aspect"),
                     engine=opts.get("engine"),
+                    face_fix=opts.get("face_fix"),
                 )
             except t2i_mod.T2IError as exc:
                 raise HTTPException(400, str(exc)) from exc

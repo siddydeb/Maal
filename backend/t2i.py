@@ -1,13 +1,18 @@
 """Text-to-image (no upload) and the Klein keep-face edit.
 
-T2I engines: FLUX.2 Klein 9B (default for new girls) or Flux Dev + realism LoRA stack;
-a trained character always uses Flux Dev since its LoRA is Flux.1.
+T2I engines: FLUX.2 Klein 9B (default for new girls) or Flux Dev + realism LoRA stack.
+A trained character uses Flux Dev (Flux.1 LoRA) unless its entry says ``"engine": "klein"``.
 
 Knobs, LoRA filenames, characters and saved outfits live in ``private/t2i.json``.
 A character entry looks like::
 
     {"id": "zara", "name": "Zara", "lora": "zara_v1.safetensors",
      "strength": 1.0, "trigger": "zara_v1 woman", "description": "..."}
+
+Klein characters may add ``"loras": [{"file", "strength"}]`` (stacked after the
+character LoRA), ``"suffix"`` (appended after the user text), ``"ref_gridfs_id"``
+(face photo fed as a ReferenceLatent) and ``"face_fix": true`` (re-render the
+largest face at full resolution; fixes small faces in full-body shots).
 """
 
 from __future__ import annotations
@@ -35,7 +40,7 @@ _DEFAULTS: dict[str, Any] = {
     "loras": [],
     "characters": [],
     "outfits": [],
-    # "klein" | "flux"; trained characters always use flux (their LoRAs are Flux.1).
+    # "klein" | "flux"; characters use their own "engine" (default flux).
     "engine": "klein",
     "klein": {
         "unet": "flux-2-klein-9b-Q8_0.gguf",
@@ -49,6 +54,12 @@ _DEFAULTS: dict[str, Any] = {
 }
 
 ENGINES = {"klein": "Klein 9B", "flux": "Flux Dev"}
+
+FACE_FIX_DEFAULTS = {"denoise": 0.4, "steps": 8}
+FACE_FIX_PROMPT = (
+    "Close-up photo of the face of {trigger}, the same woman as in the reference image, "
+    "natural unretouched skin with visible pores, same lighting and expression."
+)
 
 _LORA_CACHE: dict[str, Any] = {"at": 0.0, "names": None}
 _LORA_CACHE_TTL = 60.0
@@ -69,6 +80,8 @@ class T2IPlan:
     aspect: str
     engine: str = "flux"
     warnings: list[str] = field(default_factory=list)
+    ref_gridfs_id: Optional[str] = None
+    face_fix: Optional[dict[str, Any]] = None
 
 
 def load_config(*, with_trained: bool = True) -> dict[str, Any]:
@@ -131,6 +144,8 @@ def public_config(cfg: dict[str, Any], installed: Optional[set[str]]) -> dict[st
                 "id": c.get("id"),
                 "name": c.get("name") or c.get("id"),
                 "installed": has(c.get("lora")),
+                "engine": character_engine(c),
+                "face_fix": bool(c.get("face_fix")) and character_engine(c) == "klein",
             }
             for c in cfg.get("characters") or []
         ],
@@ -147,9 +162,15 @@ def public_config(cfg: dict[str, Any], installed: Optional[set[str]]) -> dict[st
     }
 
 
-def resolve_engine(cfg: dict[str, Any], engine: Optional[str], character_id: Optional[str]) -> str:
-    if character_id:
-        return "flux"
+def character_engine(character: dict[str, Any]) -> str:
+    return "klein" if str(character.get("engine") or "").lower() == "klein" else "flux"
+
+
+def resolve_engine(
+    cfg: dict[str, Any], engine: Optional[str], character: Optional[dict[str, Any]]
+) -> str:
+    if character:
+        return character_engine(character)
     choice = (engine or cfg.get("engine") or "flux").strip().lower()
     return choice if choice in ENGINES else "flux"
 
@@ -163,12 +184,13 @@ def plan_t2i(
     outfit_id: Optional[str] = None,
     aspect: Optional[str] = None,
     engine: Optional[str] = None,
+    face_fix: Optional[bool] = None,
 ) -> T2IPlan:
     warnings: list[str] = []
-    engine_id = resolve_engine(cfg, engine, character_id)
     character = _by_id(cfg.get("characters") or [], character_id)
     if character_id and not character:
         raise T2IError(f"Unknown character '{character_id}'.")
+    engine_id = resolve_engine(cfg, engine, character)
     outfit = _by_id(cfg.get("outfits") or [], outfit_id)
     if outfit_id and not outfit:
         raise T2IError(f"Unknown outfit '{outfit_id}'.")
@@ -219,6 +241,15 @@ def plan_t2i(
             s = float(character.get("strength", 1.0))
             # Character LoRA goes first so realism LoRAs sit on top of identity.
             stack.insert(0, (fn, s, s))
+            for i, spec in enumerate(character.get("loras") or []):
+                extra = str(spec.get("file") or "")
+                if not extra:
+                    continue
+                if not available(extra):
+                    warnings.append(f"LoRA missing on ComfyUI, skipped: {extra}")
+                    continue
+                es = float(spec.get("strength", 0.6))
+                stack.insert(1 + i, (extra, es, es))
         if character.get("trigger"):
             parts.append(str(character["trigger"]).strip() + ",")
         if character.get("description"):
@@ -228,8 +259,18 @@ def plan_t2i(
     parts.append(user_text)
     if outfit and outfit.get("text"):
         parts.append(str(outfit["text"]).strip())
+    if character and character.get("suffix"):
+        parts.append(str(character["suffix"]).strip())
     if cfg.get("prompt_suffix"):
         parts.append(str(cfg["prompt_suffix"]).strip())
+
+    ref_id: Optional[str] = None
+    fix: Optional[dict[str, Any]] = None
+    if character and engine_id == "klein":
+        ref_id = str(character.get("ref_gridfs_id") or "") or None
+        if character.get("face_fix") and face_fix is not False:
+            trigger = str(character.get("trigger") or "the woman").strip()
+            fix = {**FACE_FIX_DEFAULTS, "prompt": FACE_FIX_PROMPT.format(trigger=trigger)}
 
     return T2IPlan(
         prompt=" ".join(p for p in parts if p),
@@ -241,7 +282,18 @@ def plan_t2i(
         aspect=aspect_id,
         engine=engine_id,
         warnings=warnings,
+        ref_gridfs_id=ref_id,
+        face_fix=fix,
     )
+
+
+async def _gridfs_bytes(file_id: str) -> bytes:
+    from bson import ObjectId
+
+    from backend import db
+
+    stream = await db.fs().open_download_stream(ObjectId(file_id))
+    return await stream.read()
 
 
 async def run_t2i(
@@ -253,6 +305,7 @@ async def run_t2i(
     outfit_id: Optional[str] = None,
     aspect: Optional[str] = None,
     engine: Optional[str] = None,
+    face_fix: Optional[bool] = None,
 ) -> tuple[bytes, str, dict[str, Any]]:
     """Returns (image_bytes, content_type, meta)."""
     cfg = load_config()
@@ -265,10 +318,17 @@ async def run_t2i(
         outfit_id=outfit_id,
         aspect=aspect,
         engine=engine,
+        face_fix=face_fix,
     )
     if plan.engine == "klein":
         kc = cfg["klein"]
         unet = str(kc["unet"])
+        ref_bytes: Optional[bytes] = None
+        if plan.ref_gridfs_id:
+            try:
+                ref_bytes = await _gridfs_bytes(plan.ref_gridfs_id)
+            except Exception:
+                plan.warnings.append("Character face photo missing; generated from the LoRA only.")
         data, ctype, seed_used = await client.generate_klein(
             plan.prompt,
             width=plan.width,
@@ -279,6 +339,8 @@ async def run_t2i(
             clip=kc.get("clip"),
             vae=kc.get("vae"),
             loras=[(fn, sm) for fn, sm, _ in plan.loras],
+            image_bytes=ref_bytes,
+            face_fix=plan.face_fix,
         )
         workflow_ref = "t2i.klein.v1"
     else:
@@ -310,6 +372,8 @@ async def run_t2i(
             "width": plan.width,
             "height": plan.height,
             "final_prompt": plan.prompt,
+            "face_ref": bool(plan.ref_gridfs_id),
+            "face_fix": plan.face_fix is not None,
         },
         "engine_warnings": plan.warnings,
     }

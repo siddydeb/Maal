@@ -386,6 +386,7 @@ export async function startJob({
       if (t2i.character) body.append("character", t2i.character);
       if (t2i.outfit) body.append("outfit", t2i.outfit);
       if (t2i.aspect) body.append("aspect", t2i.aspect);
+      if (t2i.faceFix === false) body.append("face_fix", "0");
     }
     if (engine) body.append("engine", engine);
     body.append("client_key", idem);

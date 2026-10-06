@@ -309,6 +309,7 @@ class ComfyClient:
         vae: Optional[str] = None,
         loras: Optional[list[tuple[str, float]]] = None,
         image_bytes: Optional[bytes] = None,
+        face_fix: Optional[dict[str, Any]] = None,
     ) -> tuple[bytes, str, int]:
         """FLUX.2 Klein text-to-image, or reference edit when image_bytes is given.
         Returns (bytes, content_type, seed_used)."""
@@ -328,6 +329,7 @@ class ComfyClient:
                 vae=vae or wk.KLEIN_VAE,
                 loras=loras,
                 ref_image_name=image_name,
+                face_fix=face_fix,
             )
             data, ctype = await self._run_and_fetch(
                 workflow, prefer=("images",), input_name=image_name
