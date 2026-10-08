@@ -577,6 +577,7 @@ async def start_job(
     aspect: Optional[str] = Form(None),
     engine: Optional[str] = Form(None),
     face_fix: Optional[str] = Form(None),
+    place_box: Optional[str] = Form(None),
     owner: str = Depends(require_owner),
 ):
     """
@@ -586,9 +587,11 @@ async def start_job(
     Optional client_key: idempotency token so mobile/network retries of the same
     tap do not enqueue duplicate jobs.
 
-    mode=t2i needs no image; character/outfit/aspect pick entries from t2i config.
+    mode=t2i needs no image; an image sent with t2i is a background to place her into (Klein).
+    character/outfit/aspect pick entries from t2i config.
     engine: t2i "klein" | "flux"; img "klein" (keep-face edit) or empty for the standard engine.
     face_fix: "0" turns off a Klein character's face re-render (on by default).
+    place_box: "x0,y0,x1,y1" (fractions) where she goes in the background; for crowded photos.
     """
     prompt = (prompt or "").strip()
     if not prompt:
@@ -611,9 +614,23 @@ async def start_job(
             "aspect": (aspect or "").strip() or None,
             "engine": engine if engine in ("klein", "flux") else None,
             "face_fix": False if (face_fix or "").strip().lower() in ("0", "false", "off") else None,
+            "background": image is not None,
         }
         try:
-            t2i_mod.plan_t2i(prompt, cfg=t2i_mod.load_config(), installed=None, **t2i_options)
+            box = t2i_mod.parse_place_box(place_box) if image is not None else None
+            if box:
+                t2i_options["place_box"] = list(box)
+            t2i_mod.plan_t2i(
+                prompt,
+                cfg=t2i_mod.load_config(),
+                installed=None,
+                character_id=t2i_options["character"],
+                outfit_id=t2i_options["outfit"],
+                aspect=t2i_options["aspect"],
+                engine=t2i_options["engine"],
+                face_fix=t2i_options["face_fix"],
+                background=t2i_options["background"],
+            )
         except t2i_mod.T2IError as exc:
             raise HTTPException(400, str(exc)) from exc
 
@@ -650,7 +667,7 @@ async def start_job(
     )
     if is_tester_owner(owner):
         is_test = True
-    image_bytes = await _read_image_bytes(image) if mode != "t2i" else None
+    image_bytes = await _read_image_bytes(image) if image is not None else None
     client = _comfy()
     settings = get_settings()
     if not await client.health(timeout=12.0, retries=3):
@@ -867,6 +884,8 @@ async def _execute_generation(
                     aspect=opts.get("aspect"),
                     engine=opts.get("engine"),
                     face_fix=opts.get("face_fix"),
+                    background_bytes=image_bytes if opts.get("background") else None,
+                    place_box=tuple(opts["place_box"]) if opts.get("place_box") else None,
                 )
             except t2i_mod.T2IError as exc:
                 raise HTTPException(400, str(exc)) from exc
@@ -994,7 +1013,9 @@ async def _execute_generation(
 async def _resume_persisted_job(job: dict) -> None:
     """Re-run a queued/running job after API worker restart using stored start image."""
     job_id = job["id"]
-    needs_image = (job.get("mode") or "img") != "t2i"
+    needs_image = (job.get("mode") or "img") != "t2i" or bool(
+        (job.get("options") or {}).get("background")
+    )
     image_bytes = db.get_job_input_bytes_sync(job_id) if needs_image else None
     if needs_image and not image_bytes:
         image_bytes = await db.get_job_input_bytes(job_id)

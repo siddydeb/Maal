@@ -309,15 +309,25 @@ class ComfyClient:
         vae: Optional[str] = None,
         loras: Optional[list[tuple[str, float]]] = None,
         image_bytes: Optional[bytes] = None,
+        ref_images: Optional[list[bytes]] = None,
+        face_ref_index: int = 0,
         face_fix: Optional[dict[str, Any]] = None,
+        face_mask: Optional[bytes] = None,
     ) -> tuple[bytes, str, int]:
-        """FLUX.2 Klein text-to-image, or reference edit when image_bytes is given.
-        Returns (bytes, content_type, seed_used)."""
+        """FLUX.2 Klein text-to-image, or reference edit when image_bytes / ref_images
+        (image 1, image 2, ... in the prompt) are given. ``face_mask`` (PNG, white = her area)
+        keeps the face fix off other people. Returns (bytes, content_type, seed_used)."""
         from backend import workflows_klein as wk
 
         seed = seed if seed is not None else random.randint(0, 2**32 - 1)
-        image_name = await self._upload_image(image_bytes) if image_bytes else None
+        images = list(ref_images or ([image_bytes] if image_bytes else []))
+        names: list[str] = []
+        mask_name: Optional[str] = None
         try:
+            for img in images:
+                names.append(await self._upload_image(img))
+            if face_mask and face_fix is not None:
+                mask_name = await self._upload_image(face_mask)
             workflow = wk.build_klein_prompt(
                 positive=prompt,
                 width=width,
@@ -328,16 +338,20 @@ class ComfyClient:
                 clip=clip or wk.KLEIN_CLIP,
                 vae=vae or wk.KLEIN_VAE,
                 loras=loras,
-                ref_image_name=image_name,
+                ref_image_names=names,
+                face_ref_index=face_ref_index,
                 face_fix=face_fix,
+                face_mask_image_name=mask_name,
             )
             data, ctype = await self._run_and_fetch(
-                workflow, prefer=("images",), input_name=image_name
+                workflow, prefer=("images",), input_name=names[0] if names else None
             )
         except Exception:
-            if image_name:
-                await self._full_scrub(input_name=image_name)
+            for name in names + ([mask_name] if mask_name else []):
+                await self._full_scrub(input_name=name)
             raise
+        for name in names[1:] + ([mask_name] if mask_name else []):
+            await self._full_scrub(input_name=name)
         return data, ctype, seed
 
     async def lora_names(self) -> set[str]:

@@ -25,11 +25,17 @@ def build_klein_prompt(
     vae: str = KLEIN_VAE,
     loras: Optional[list[tuple[str, float]]] = None,
     ref_image_name: Optional[str] = None,
+    ref_image_names: Optional[list[str]] = None,
+    face_ref_index: int = 0,
     face_fix: Optional[dict[str, Any]] = None,
+    face_mask_image_name: Optional[str] = None,
     filename_prefix: str = "wan_klein",
 ) -> dict[str, Any]:
-    """``face_fix`` ({"prompt", "denoise", "steps"}) re-renders the detected face at full
-    resolution with the same model, LoRAs and reference, then pastes it back (Impact FaceDetailer)."""
+    """References are chained in order (prompt calls them image 1, image 2, ...; max 4).
+    ``face_fix`` ({"prompt", "denoise", "steps"}) re-renders the largest detected face at full
+    resolution with the same model and LoRAs, guided by reference ``face_ref_index``.
+    ``face_mask_image_name`` (white = her area) limits the face fix to faces inside it."""
+    refs = list(ref_image_names or ([ref_image_name] if ref_image_name else []))[:4]
     loader = "UnetLoaderGGUF" if unet.endswith(".gguf") else "UNETLoader"
     unet_inputs: dict[str, Any] = {"unet_name": unet}
     if loader == "UNETLoader":
@@ -51,15 +57,16 @@ def build_klein_prompt(
     g["5"] = {"class_type": "CLIPTextEncode", "inputs": {"text": positive, "clip": ["2", 0]}}
     g["6"] = {"class_type": "ConditioningZeroOut", "inputs": {"conditioning": ["5", 0]}}
     pos: list[Any] = ["5", 0]
-    if ref_image_name:
-        g["30"] = {"class_type": "LoadImage", "inputs": {"image": ref_image_name}}
-        g["31"] = {
+    for k, name in enumerate(refs):
+        load, scale, enc, ref = (str(30 + 4 * k + j) for j in range(4))
+        g[load] = {"class_type": "LoadImage", "inputs": {"image": name}}
+        g[scale] = {
             "class_type": "ImageScaleToTotalPixels",
-            "inputs": {"image": ["30", 0], "upscale_method": "lanczos", "megapixels": 1.0, "resolution_steps": 1},
+            "inputs": {"image": [load, 0], "upscale_method": "lanczos", "megapixels": 1.0, "resolution_steps": 1},
         }
-        g["32"] = {"class_type": "VAEEncode", "inputs": {"pixels": ["31", 0], "vae": ["3", 0]}}
-        g["33"] = {"class_type": "ReferenceLatent", "inputs": {"conditioning": pos, "latent": ["32", 0]}}
-        pos = ["33", 0]
+        g[enc] = {"class_type": "VAEEncode", "inputs": {"pixels": [scale, 0], "vae": ["3", 0]}}
+        g[ref] = {"class_type": "ReferenceLatent", "inputs": {"conditioning": pos, "latent": [enc, 0]}}
+        pos = [ref, 0]
 
     g.update({
         "7": {"class_type": "CFGGuider", "inputs": {"model": model, "positive": pos, "negative": ["6", 0], "cfg": 1.0}},
@@ -75,7 +82,12 @@ def build_klein_prompt(
         "14": {"class_type": "SaveImage", "inputs": {"images": ["13", 0], "filename_prefix": filename_prefix}},
     })
     if face_fix is not None:
-        _add_face_fix(g, model=model, seed=seed, ref_latent=["32", 0] if ref_image_name else None, **face_fix)
+        within = None
+        if face_mask_image_name:
+            g["61"] = {"class_type": "LoadImageMask", "inputs": {"image": face_mask_image_name, "channel": "red"}}
+            within = ["61", 0]
+        face_latent = [str(32 + 4 * face_ref_index), 0] if 0 <= face_ref_index < len(refs) else None
+        _add_face_fix(g, model=model, seed=seed, ref_latent=face_latent, within=within, **face_fix)
     return g
 
 
@@ -85,6 +97,7 @@ def _add_face_fix(
     model: list[Any],
     seed: int,
     ref_latent: Optional[list[Any]],
+    within: Optional[list[Any]],
     prompt: str,
     denoise: float = 0.5,
     steps: int = 8,
@@ -103,10 +116,15 @@ def _add_face_fix(
             "dilation": 16, "crop_factor": 2.2, "drop_size": 24, "labels": "all",
         },
     }
+    segs: list[Any] = ["53", 0]
+    if within:
+        # Crowded scene: only faces inside her area are candidates.
+        g["56"] = {"class_type": "ImpactSegsAndMask", "inputs": {"segs": segs, "mask": within}}
+        segs = ["56", 0]
     # Only the largest face is hers; background people keep their own faces.
     g["54"] = {
         "class_type": "ImpactSEGSOrderedFilter",
-        "inputs": {"segs": ["53", 0], "target": "area(=w*h)", "order": True, "take_start": 0, "take_count": 1},
+        "inputs": {"segs": segs, "target": "area(=w*h)", "order": True, "take_start": 0, "take_count": 1},
     }
     g["55"] = {
         "class_type": "DetailerForEach",

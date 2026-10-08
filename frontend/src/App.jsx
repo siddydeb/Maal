@@ -193,6 +193,66 @@ function statusForJob(j) {
   return null;
 }
 
+/** Background preview; drag a box to mark where she goes. value = [x0, y0, x1, y1] fractions. */
+function SpotPicker({ src, value, onChange }) {
+  const boxRef = useRef(null);
+  const startRef = useRef(null);
+  const [draft, setDraft] = useState(null);
+
+  function point(e) {
+    const r = boxRef.current.getBoundingClientRect();
+    const clamp = (v) => Math.min(1, Math.max(0, v));
+    return [clamp((e.clientX - r.left) / r.width), clamp((e.clientY - r.top) / r.height)];
+  }
+  function toBox(a, b) {
+    return [Math.min(a[0], b[0]), Math.min(a[1], b[1]), Math.max(a[0], b[0]), Math.max(a[1], b[1])];
+  }
+  function onDown(e) {
+    e.preventDefault();
+    e.currentTarget.setPointerCapture(e.pointerId);
+    startRef.current = point(e);
+    setDraft(toBox(startRef.current, startRef.current));
+  }
+  function onMove(e) {
+    if (startRef.current) setDraft(toBox(startRef.current, point(e)));
+  }
+  function onUp(e) {
+    if (!startRef.current) return;
+    const box = toBox(startRef.current, point(e));
+    startRef.current = null;
+    setDraft(null);
+    if (box[2] - box[0] >= 0.04 && box[3] - box[1] >= 0.04) onChange(box);
+  }
+
+  const shown = draft || value;
+  return (
+    <div
+      ref={boxRef}
+      className="spot-picker"
+      onPointerDown={onDown}
+      onPointerMove={onMove}
+      onPointerUp={onUp}
+      onPointerCancel={() => {
+        startRef.current = null;
+        setDraft(null);
+      }}
+    >
+      <img src={src} alt="Background" draggable={false} />
+      {shown && (
+        <div
+          className="spot-box"
+          style={{
+            left: `${shown[0] * 100}%`,
+            top: `${shown[1] * 100}%`,
+            width: `${(shown[2] - shown[0]) * 100}%`,
+            height: `${(shown[3] - shown[1]) * 100}%`,
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
 export default function App() {
   const [mode, setMode] = useState("img");
   const [videoSeconds, setVideoSeconds] = useState(5);
@@ -241,9 +301,27 @@ export default function App() {
   const [t2iSeed, setT2iSeed] = useState("");
   const [t2iEngine, setT2iEngine] = useState("");
   const [t2iFaceFix, setT2iFaceFix] = useState(true);
+  const [t2iBg, setT2iBg] = useState(null);
+  const [t2iBgUrl, setT2iBgUrl] = useState(null);
+  const t2iBgRef = useRef(null);
+  const [t2iSpot, setT2iSpot] = useState(null);
   const [imgEngine, setImgEngine] = useState("standard");
   const t2iGirl = (t2iConfig?.characters || []).find((c) => c.id === t2iCharacter) || null;
   const t2iGirlEngine = t2iGirl ? t2iGirl.engine || "flux" : null;
+  const t2iBgAllowed =
+    (t2iGirlEngine || t2iEngine || t2iConfig?.default_engine) === "klein";
+  const t2iUseBg = t2iBgAllowed && !!t2iBg;
+
+  function pickBackground(f) {
+    if (f && !f.type.startsWith("image/")) return;
+    setT2iBg(f || null);
+    setT2iSpot(null);
+    setT2iBgUrl((prev) => {
+      if (prev) URL.revokeObjectURL(prev);
+      return f ? URL.createObjectURL(f) : null;
+    });
+    if (!f && t2iBgRef.current) t2iBgRef.current.value = "";
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -981,7 +1059,7 @@ export default function App() {
       const started = await startJob({
         mode: genMode,
         prompt: trimmed,
-        file: isT2i ? null : file,
+        file: isT2i ? (t2iUseBg ? t2iBg : null) : file,
         seed: isT2i && seedText ? Number(seedText) : undefined,
         videoSeconds: genMode === "vid" ? secs : undefined,
         presetId: presetId || undefined,
@@ -992,6 +1070,7 @@ export default function App() {
               outfit: t2iOutfit,
               aspect: t2iAspect,
               faceFix: t2iGirl?.face_fix ? t2iFaceFix : undefined,
+              placeBox: t2iUseBg && t2iSpot ? t2iSpot : undefined,
             }
           : undefined,
         engine: isT2i
@@ -1478,6 +1557,53 @@ export default function App() {
                         </p>
                       </div>
                     )}
+                    <div className="t2i-field">
+                      <span>Background</span>
+                      <input
+                        ref={t2iBgRef}
+                        type="file"
+                        accept="image/*"
+                        hidden
+                        onChange={(e) => pickBackground(e.target.files?.[0])}
+                      />
+                      {t2iBgUrl ? (
+                        <div className="t2i-bg">
+                          <SpotPicker src={t2iBgUrl} value={t2iSpot} onChange={setT2iSpot} />
+                          <div className="t2i-bg-actions">
+                            {t2iSpot && (
+                              <button type="button" className="ghost" onClick={() => setT2iSpot(null)}>
+                                Clear spot
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              className="ghost"
+                              onClick={() => pickBackground(null)}
+                            >
+                              Remove
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          className="duration-btn"
+                          disabled={!t2iBgAllowed}
+                          onClick={() => t2iBgRef.current?.click()}
+                        >
+                          Upload your own background
+                        </button>
+                      )}
+                      <p className="setting-hint">
+                        {!t2iBgAllowed
+                          ? "Backgrounds need the Klein 9B model."
+                          : t2iSpot
+                            ? "She goes only inside the box; everyone else stays exactly as is. The box size sets her size. Say the pose in the prompt, e.g. sitting on the steps."
+                            : t2iBg
+                              ? "Crowded photo? Drag a box over an empty spot where she should be (tall box to stand, smaller to sit). Without a box she's placed anywhere: best for empty scenes."
+                              : "Optional: place her into your own photo."}
+                      </p>
+                    </div>
                     <label className="t2i-field">
                       <span>Outfit</span>
                       <select
@@ -1492,6 +1618,7 @@ export default function App() {
                         ))}
                       </select>
                     </label>
+                    {!t2iUseBg && (
                     <div className="t2i-field">
                       <span>Shape</span>
                       <div className="duration">
@@ -1509,6 +1636,7 @@ export default function App() {
                         ))}
                       </div>
                     </div>
+                    )}
                     <label className="t2i-field">
                       <span>Seed</span>
                       <div className="t2i-seed">

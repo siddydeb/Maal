@@ -115,6 +115,47 @@ class KleinPlanTests(unittest.TestCase):
         self.assertEqual((pub["engine"], pub["face_fix"]), ("klein", True))
         self.assertNotIn("abc123", str(t2i.public_config(cfg, None)))
 
+    def test_background_places_character_into_image_1(self) -> None:
+        cfg = {**CFG, "characters": CFG["characters"] + [self.KAVYA]}
+        p = t2i.plan_t2i("sitting on the bench", cfg=cfg, installed=None, character_id="kavya", background=True)
+        self.assertTrue(p.prompt.startswith("Place kavya woman from image 2 into the scene of image 1. sitting on the bench."))
+        self.assertIn(t2i.BACKGROUND_KEEP, p.prompt)
+        self.assertTrue(p.background)
+        self.assertEqual(p.aspect, "background")
+        with self.assertRaises(t2i.T2IError):
+            t2i.plan_t2i("x", cfg=CFG, installed=None, character_id="zara", background=True)
+        anon = t2i.plan_t2i("standing by the door", cfg=self.KCFG, installed=None, background=True)
+        self.assertIn("Place the woman into the scene of image 1.", anon.prompt)
+
+    def test_place_box_parsing(self) -> None:
+        self.assertIsNone(t2i.parse_place_box(""))
+        self.assertIsNone(t2i.parse_place_box(None))
+        self.assertEqual(t2i.parse_place_box("0.1,0.2,0.5,1.3"), (0.1, 0.2, 0.5, 1.0))
+        for bad in ("1,2,3", "a,b,c,d", "0.5,0.5,0.51,0.9"):
+            with self.assertRaises(t2i.T2IError):
+                t2i.parse_place_box(bad)
+
+    def test_spot_only_changes_pixels_near_the_box(self) -> None:
+        import io
+
+        from PIL import Image
+
+        photo = io.BytesIO()
+        Image.new("RGB", (1000, 800), (10, 20, 30)).save(photo, format="PNG")
+        spot = t2i._Spot(photo.getvalue(), (0.6, 0.1, 0.9, 0.7))
+        cx0, cy0, cx1, cy1 = spot.crop
+        self.assertEqual((cx0, cy0, cx1), (495, 0, 1000))
+        self.assertEqual((spot.width % 16, spot.height % 16), (0, 0))
+        gen = io.BytesIO()
+        Image.new("RGB", (spot.width, spot.height), (250, 250, 250)).save(gen, format="PNG")
+        out = Image.open(io.BytesIO(spot.paste(gen.getvalue())))
+        self.assertEqual(out.size, (1000, 800))
+        self.assertEqual(out.getpixel((750, 300)), (250, 250, 250))
+        self.assertEqual(out.getpixel((100, 400)), (10, 20, 30))
+        self.assertEqual(out.getpixel((520, 300)), (10, 20, 30))
+        face = Image.open(io.BytesIO(spot.face_mask_png))
+        self.assertEqual(face.getpixel((0, 0)), (0, 0, 0))
+
     def test_edit_prompt_appends_keep_face_once(self) -> None:
         out = t2i.edit_prompt("change her top to a red saree", self.KCFG)
         self.assertTrue(out.startswith("change her top to a red saree."))
@@ -155,6 +196,26 @@ class KleinGraphTests(unittest.TestCase):
         self.assertEqual(g["14"]["inputs"]["images"], ["55", 0])
         plain = build_klein_prompt(positive="a woman", width=832, height=1216, seed=3)
         self.assertEqual(plain["14"]["inputs"]["images"], ["13", 0])
+
+    def test_two_references_chain_and_face_fix_uses_face_ref(self) -> None:
+        g = build_klein_prompt(
+            positive="place her", width=1168, height=880, seed=3, ref_image_names=["bg.png", "face.png"],
+            face_ref_index=1, face_fix={"prompt": "her face"},
+        )
+        self.assertEqual(g["30"]["inputs"]["image"], "bg.png")
+        self.assertEqual(g["34"]["inputs"]["image"], "face.png")
+        self.assertEqual(g["37"]["inputs"]["conditioning"], ["33", 0])
+        self.assertEqual(g["7"]["inputs"]["positive"], ["37", 0])
+        self.assertEqual(g["52"]["inputs"]["latent"], ["36", 0])
+
+    def test_face_mask_limits_face_fix_to_her_area(self) -> None:
+        g = build_klein_prompt(
+            positive="place her", width=896, height=1152, seed=3, ref_image_names=["bg.png", "face.png"],
+            face_ref_index=1, face_fix={"prompt": "her face"}, face_mask_image_name="m.png",
+        )
+        self.assertEqual(g["61"]["inputs"]["image"], "m.png")
+        self.assertEqual(g["56"]["inputs"], {"segs": ["53", 0], "mask": ["61", 0]})
+        self.assertEqual(g["54"]["inputs"]["segs"], ["56", 0])
 
     def test_edit_size_keeps_aspect_at_1mp(self) -> None:
         w, h = edit_size(832, 1216)

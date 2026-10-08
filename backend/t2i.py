@@ -60,6 +60,11 @@ FACE_FIX_PROMPT = (
     "Close-up photo of the face of {trigger}, the same woman as in the reference image, "
     "natural unretouched skin with visible pores, same lighting and expression."
 )
+BACKGROUND_KEEP = (
+    "Keep the scene of image 1 exactly the same: same place, camera angle, perspective, framing, "
+    "objects and colors. She fits naturally into the scene at the correct size and position, lit by "
+    "the same light as image 1, with matching shadows, color grading, grain and focus."
+)
 
 _LORA_CACHE: dict[str, Any] = {"at": 0.0, "names": None}
 _LORA_CACHE_TTL = 60.0
@@ -82,6 +87,7 @@ class T2IPlan:
     warnings: list[str] = field(default_factory=list)
     ref_gridfs_id: Optional[str] = None
     face_fix: Optional[dict[str, Any]] = None
+    background: bool = False
 
 
 def load_config(*, with_trained: bool = True) -> dict[str, Any]:
@@ -185,12 +191,17 @@ def plan_t2i(
     aspect: Optional[str] = None,
     engine: Optional[str] = None,
     face_fix: Optional[bool] = None,
+    background: bool = False,
 ) -> T2IPlan:
+    """``background``: the user's photo is image 1 and she is placed into it (Klein only);
+    the output then takes the background's aspect instead of ``aspect``."""
     warnings: list[str] = []
     character = _by_id(cfg.get("characters") or [], character_id)
     if character_id and not character:
         raise T2IError(f"Unknown character '{character_id}'.")
     engine_id = resolve_engine(cfg, engine, character)
+    if background and engine_id != "klein":
+        raise T2IError("A background photo needs the Klein 9B model.")
     outfit = _by_id(cfg.get("outfits") or [], outfit_id)
     if outfit_id and not outfit:
         raise T2IError(f"Unknown outfit '{outfit_id}'.")
@@ -250,27 +261,32 @@ def plan_t2i(
                     continue
                 es = float(spec.get("strength", 0.6))
                 stack.insert(1 + i, (extra, es, es))
-        if character.get("trigger"):
-            parts.append(str(character["trigger"]).strip() + ",")
-        if character.get("description"):
-            parts.append(str(character["description"]).strip())
+    ref_id: Optional[str] = None
+    if character and engine_id == "klein":
+        ref_id = str(character.get("ref_gridfs_id") or "") or None
+    trigger = str((character or {}).get("trigger") or "").strip()
+    if background:
+        who = (trigger or "the woman") + (" from image 2" if ref_id else "")
+        parts.append(f"Place {who} into the scene of image 1.")
+    elif trigger:
+        parts.append(trigger + ",")
+    if character and character.get("description"):
+        parts.append(str(character["description"]).strip())
     if user_text and user_text[-1] not in ".!?,;":
         user_text += "."
     parts.append(user_text)
     if outfit and outfit.get("text"):
         parts.append(str(outfit["text"]).strip())
+    if background:
+        parts.append(BACKGROUND_KEEP)
     if character and character.get("suffix"):
         parts.append(str(character["suffix"]).strip())
     if cfg.get("prompt_suffix"):
         parts.append(str(cfg["prompt_suffix"]).strip())
 
-    ref_id: Optional[str] = None
     fix: Optional[dict[str, Any]] = None
-    if character and engine_id == "klein":
-        ref_id = str(character.get("ref_gridfs_id") or "") or None
-        if character.get("face_fix") and face_fix is not False:
-            trigger = str(character.get("trigger") or "the woman").strip()
-            fix = {**FACE_FIX_DEFAULTS, "prompt": FACE_FIX_PROMPT.format(trigger=trigger)}
+    if character and engine_id == "klein" and character.get("face_fix") and face_fix is not False:
+        fix = {**FACE_FIX_DEFAULTS, "prompt": FACE_FIX_PROMPT.format(trigger=trigger or "the woman")}
 
     return T2IPlan(
         prompt=" ".join(p for p in parts if p),
@@ -279,12 +295,110 @@ def plan_t2i(
         loras=stack,
         character_id=character.get("id") if character else None,
         outfit_id=outfit.get("id") if outfit else None,
-        aspect=aspect_id,
+        aspect="background" if background else aspect_id,
         engine=engine_id,
         warnings=warnings,
         ref_gridfs_id=ref_id,
         face_fix=fix,
+        background=background,
     )
+
+
+def _normalize_photo(data: bytes) -> tuple[bytes, int, int]:
+    """Upright RGB PNG at ~1MP keeping the photo's aspect (Klein edit size)."""
+    import io
+
+    from PIL import Image, ImageOps
+
+    from backend.workflows_klein import edit_size
+
+    with Image.open(io.BytesIO(data)) as im:
+        img = ImageOps.exif_transpose(im).convert("RGB")
+    width, height = edit_size(*img.size)
+    buf = io.BytesIO()
+    img.resize((width, height), Image.Resampling.LANCZOS).save(buf, format="PNG")
+    return buf.getvalue(), width, height
+
+
+Box = tuple[float, float, float, float]
+
+
+def parse_place_box(raw: Any) -> Optional[Box]:
+    """"x0,y0,x1,y1" as fractions of the photo -> box, or None when empty."""
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return None
+    try:
+        vals = [float(v) for v in (raw.split(",") if isinstance(raw, str) else raw)]
+    except (TypeError, ValueError):
+        raise T2IError("place_box must be four numbers: x0,y0,x1,y1.")
+    if len(vals) != 4:
+        raise T2IError("place_box must be four numbers: x0,y0,x1,y1.")
+    x0, y0, x1, y1 = (min(1.0, max(0.0, v)) for v in vals)
+    if x1 - x0 < 0.04 or y1 - y0 < 0.04:
+        raise T2IError("The marked spot is too small.")
+    return x0, y0, x1, y1
+
+
+class _Spot:
+    """Crowded photo: she is generated in a crop around the marked box (which is mostly empty,
+    so the normal placement works) and pasted back inside the box only, leaving everyone else
+    untouched."""
+
+    CONTEXT = 0.35
+    MAX_MP = 2.5
+
+    def __init__(self, photo: bytes, box: Box) -> None:
+        import io
+
+        from PIL import Image, ImageDraw, ImageFilter, ImageOps
+
+        from backend.workflows_klein import edit_size
+
+        with Image.open(io.BytesIO(photo)) as im:
+            base = ImageOps.exif_transpose(im).convert("RGB")
+        scale = min(1.0, (self.MAX_MP * 1024 * 1024 / (base.width * base.height)) ** 0.5)
+        if scale < 1.0:
+            base = base.resize((round(base.width * scale), round(base.height * scale)), Image.Resampling.LANCZOS)
+        W, H = base.size
+        bx0, by0, bx1, by1 = box[0] * W, box[1] * H, box[2] * W, box[3] * H
+        mx, my = (bx1 - bx0) * self.CONTEXT, (by1 - by0) * self.CONTEXT
+        self.crop = (int(max(0, bx0 - mx)), int(max(0, by0 - my)), int(min(W, bx1 + mx)), int(min(H, by1 + my)))
+        cx0, cy0 = self.crop[:2]
+        region = base.crop(self.crop)
+        self.width, self.height = edit_size(*region.size)
+        self.base = base
+
+        paste = Image.new("L", region.size, 0)
+        ImageDraw.Draw(paste).rectangle([bx0 - cx0, by0 - cy0, bx1 - cx0, by1 - cy0], fill=255)
+        self.paste_mask = paste.filter(ImageFilter.GaussianBlur(radius=max(region.size) * 0.03))
+
+        sx, sy = self.width / region.width, self.height / region.height
+        face = Image.new("RGB", (self.width, self.height), (0, 0, 0))
+        ImageDraw.Draw(face).rectangle(
+            [(bx0 - cx0) * sx, (by0 - cy0) * sy, (bx1 - cx0) * sx, (by1 - cy0) * sy], fill=(255, 255, 255)
+        )
+        self.region_png = _png(region.resize((self.width, self.height), Image.Resampling.LANCZOS))
+        self.face_mask_png = _png(face)
+
+    def paste(self, generated: bytes) -> bytes:
+        import io
+
+        from PIL import Image
+
+        cx0, cy0, cx1, cy1 = self.crop
+        with Image.open(io.BytesIO(generated)) as im:
+            gen = im.convert("RGB").resize((cx1 - cx0, cy1 - cy0), Image.Resampling.LANCZOS)
+        out = self.base.copy()
+        out.paste(gen, (cx0, cy0), self.paste_mask)
+        return _png(out)
+
+
+def _png(img: Any) -> bytes:
+    import io
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
 
 
 async def _gridfs_bytes(file_id: str) -> bytes:
@@ -306,8 +420,11 @@ async def run_t2i(
     aspect: Optional[str] = None,
     engine: Optional[str] = None,
     face_fix: Optional[bool] = None,
+    background_bytes: Optional[bytes] = None,
+    place_box: Optional[Box] = None,
 ) -> tuple[bytes, str, dict[str, Any]]:
-    """Returns (image_bytes, content_type, meta)."""
+    """Returns (image_bytes, content_type, meta). ``background_bytes`` places her into that photo;
+    ``place_box`` (fractions x0,y0,x1,y1) puts her only in that spot (crowded photos)."""
     cfg = load_config()
     installed = await installed_loras(client)
     plan = plan_t2i(
@@ -319,14 +436,24 @@ async def run_t2i(
         aspect=aspect,
         engine=engine,
         face_fix=face_fix,
+        background=bool(background_bytes),
     )
     if plan.engine == "klein":
         kc = cfg["klein"]
         unet = str(kc["unet"])
-        ref_bytes: Optional[bytes] = None
+        refs: list[bytes] = []
+        spot: Optional[_Spot] = None
+        if background_bytes and place_box:
+            spot = _Spot(background_bytes, place_box)
+            plan.width, plan.height = spot.width, spot.height
+            refs.append(spot.region_png)
+        elif background_bytes:
+            bg, plan.width, plan.height = _normalize_photo(background_bytes)
+            refs.append(bg)
+        face_index = len(refs)
         if plan.ref_gridfs_id:
             try:
-                ref_bytes = await _gridfs_bytes(plan.ref_gridfs_id)
+                refs.append(await _gridfs_bytes(plan.ref_gridfs_id))
             except Exception:
                 plan.warnings.append("Character face photo missing; generated from the LoRA only.")
         data, ctype, seed_used = await client.generate_klein(
@@ -339,9 +466,14 @@ async def run_t2i(
             clip=kc.get("clip"),
             vae=kc.get("vae"),
             loras=[(fn, sm) for fn, sm, _ in plan.loras],
-            image_bytes=ref_bytes,
+            ref_images=refs,
+            face_ref_index=face_index,
             face_fix=plan.face_fix,
+            face_mask=spot.face_mask_png if spot else None,
         )
+        if spot:
+            data, ctype = spot.paste(data), "image/png"
+            plan.width, plan.height = spot.base.size
         workflow_ref = "t2i.klein.v1"
     else:
         data, ctype, seed_used = await client.generate_t2i(
@@ -374,6 +506,8 @@ async def run_t2i(
             "final_prompt": plan.prompt,
             "face_ref": bool(plan.ref_gridfs_id),
             "face_fix": plan.face_fix is not None,
+            "background": plan.background,
+            "place_box": list(place_box) if place_box and plan.background else None,
         },
         "engine_warnings": plan.warnings,
     }
@@ -398,12 +532,6 @@ async def run_klein_edit(
     seed: Optional[int] = None,
 ) -> tuple[bytes, str, dict[str, Any]]:
     """Klein 9B reference edit of an uploaded image (keeps the face). Returns (bytes, ctype, meta)."""
-    import io
-
-    from PIL import Image, ImageOps
-
-    from backend.workflows_klein import edit_size
-
     cfg = load_config(with_trained=False)
     kc = cfg["klein"]
     installed = await installed_loras(client)
@@ -417,14 +545,7 @@ async def run_klein_edit(
             warnings.append(f"LoRA missing on ComfyUI, skipped: {fn}")
             continue
         loras.append((fn, float(spec.get("strength", 0.8))))
-    with Image.open(io.BytesIO(image_bytes)) as im:
-        img = ImageOps.exif_transpose(im).convert("RGB")
-    width, height = edit_size(*img.size)
-    img = img.resize((width, height), Image.Resampling.LANCZOS)
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    image_bytes = buf.getvalue()
-    del img
+    image_bytes, width, height = _normalize_photo(image_bytes)
     final_prompt = edit_prompt(prompt, cfg)
     unet = str(kc["unet"])
     data, ctype, seed_used = await client.generate_klein(
