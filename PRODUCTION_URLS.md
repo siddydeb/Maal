@@ -99,7 +99,7 @@ powershell -ExecutionPolicy Bypass -File scripts/install_mobile_autostart.ps1 -S
 powershell -ExecutionPolicy Bypass -File scripts/install_mobile_autostart.ps1 -Uninstall
 ```
 
-Logs: `tmp_test/watchdog.log`. Leave this PC on (disable sleep).
+Runtime: hidden `D:\YtAuto\svc\` (override with `WAN_RUNTIME_DIR`) holds copies of the watchdog (`svc_main.py`) and gpu_agent (`svc_agent.py`), a DPAPI-encrypted subset of `tokens&cmd` (`cfg.bin`, no github/vercel keys), `start.vbs`, logs (`svc.log`, `trainer_worker.log`) and tunnel state (`tunnel_*.url/.log`). Scheduled task `UserSvcKeepalive` (sign-in + every 5 min) runs `start.vbs`, so the stack starts, heals and restarts with the repo folder locked. The watchdog re-syncs the copies on each start while the repo is readable; character-LoRA training still needs the repo unlocked. Leave this PC on (disable sleep).
 
 ## Removed / do not use
 

@@ -9,9 +9,12 @@
 #   powershell -ExecutionPolicy Bypass -File scripts/install_mobile_autostart.ps1
 #
 # Options:
-#   -NoStart           only install login shortcut (do not start now)
-#   -Status            print whether startup link + stack look healthy
-#   -Uninstall         remove login shortcut only (does not kill running processes)
+#   -NoStart           only install the keepalive task (do not start now)
+#   -Status            print whether the keepalive task + stack look healthy
+#   -Uninstall         remove the keepalive task only (does not kill running processes)
+#
+# Re-run after changing wan_stack_watchdog.py / gpu_agent.py (the watchdog also
+# re-syncs its runtime copy on every start while the repo is unlocked).
 #
 # Requires: python on PATH, cloudflared, gitignored tokens&cmd with render=<key>
 # Leave this PC on; disable sleep while you need remote gens.
@@ -24,12 +27,16 @@ param(
 
 $ErrorActionPreference = "Stop"
 $repo = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-$vbs = Join-Path $repo "scripts\start_wan_stack_hidden.vbs"
 $watchdog = Join-Path $repo "scripts\wan_stack_watchdog.py"
 $tokens = Join-Path $repo "tokens&cmd"
-$logFile = Join-Path $repo "tmp_test\watchdog.log"
+# Runtime copy lives outside the repo (hidden) so the stack restarts while the repo is locked.
+$runtime = Join-Path (Split-Path $repo -Parent) "svc"
+$vbs = Join-Path $runtime "start.vbs"
+$logFile = Join-Path $runtime "svc.log"
+$taskName = "UserSvcKeepalive"
 $startup = [Environment]::GetFolderPath("Startup")
-$lnkPath = Join-Path $startup "WanStudioGpuWatchdog.lnk"
+$legacyLnk = Join-Path $startup "WanStudioGpuWatchdog.lnk"
+$legacyTask = "WanTrainerKeepalive"
 $cloudflared = "${env:ProgramFiles(x86)}\cloudflared\cloudflared.exe"
 if (-not (Test-Path $cloudflared)) {
     $cloudflared = "$env:ProgramFiles\cloudflared\cloudflared.exe"
@@ -51,10 +58,11 @@ function Test-PortOpen([int]$Port) {
 function Show-Status {
     Write-Host "=== Mobile stack status ==="
     Write-Host "Repo:     $repo"
-    if (Test-Path $lnkPath) {
-        Write-Host "Startup:  INSTALLED - $lnkPath"
+    Write-Host "Runtime:  $runtime"
+    if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
+        Write-Host "Keepalive task: INSTALLED - $taskName"
     } else {
-        Write-Host "Startup:  MISSING"
+        Write-Host "Keepalive task: MISSING"
     }
     if (Test-Path $tokens) {
         Write-Host "tokens:   OK"
@@ -69,7 +77,7 @@ function Show-Status {
     if (Test-PortOpen 8188) { Write-Host "Comfy :8188: UP" } else { Write-Host "Comfy :8188: down" }
     if (Test-PortOpen 8799) { Write-Host "gpu_agent :8799: UP" } else { Write-Host "gpu_agent :8799: down" }
     $wd = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-        Where-Object { $_.CommandLine -and $_.CommandLine -match "wan_stack_watchdog\.py" }
+        Where-Object { $_.CommandLine -and $_.CommandLine -match "wan_stack_watchdog\.py|svc_main\.py" -and $_.Name -match "python" }
     if ($wd) {
         Write-Host ("watchdog: RUNNING (pid {0})" -f ($wd.ProcessId -join ","))
     } else {
@@ -94,16 +102,16 @@ if ($Status) {
 }
 
 if ($Uninstall) {
-    if (Test-Path $lnkPath) {
-        Remove-Item $lnkPath -Force
-        Write-Host "Removed login starter: $lnkPath"
-    } else {
-        Write-Host "No login starter to remove."
+    foreach ($t in @($taskName, $legacyTask)) {
+        if (Get-ScheduledTask -TaskName $t -ErrorAction SilentlyContinue) {
+            Unregister-ScheduledTask -TaskName $t -Confirm:$false
+            Write-Host "Removed task: $t"
+        }
     }
+    if (Test-Path $legacyLnk) { Remove-Item $legacyLnk -Force }
     exit 0
 }
 
-if (-not (Test-Path $vbs)) { throw "Missing $vbs" }
 if (-not (Test-Path $watchdog)) { throw "Missing $watchdog" }
 if (-not (Test-Path $tokens)) {
     throw "Missing tokens&cmd - add render=<Render API key> (keep file gitignored)"
@@ -119,23 +127,32 @@ if (-not (Test-Path $cloudflared)) {
     Write-Warning "cloudflared not found - install from Cloudflare, then re-run. Watchdog will fail tunnels until then."
 }
 
-# Login: hidden VBS -> python watchdog (no console, no taskbar)
-$w = New-Object -ComObject WScript.Shell
-$lnk = $w.CreateShortcut($lnkPath)
-$lnk.TargetPath = "wscript.exe"
-$lnk.Arguments = "`"$vbs`""
-$lnk.WorkingDirectory = $repo
-$lnk.WindowStyle = 7
-$lnk.Description = "Wan Studio mobile stack (Comfy + tunnels + gpu_agent) - hidden"
-$lnk.Save()
+# Copy watchdog + gpu_agent + encrypted token subset into the runtime folder
+& python $watchdog --sync-runtime
+if ($LASTEXITCODE -ne 0) { throw "runtime sync failed" }
+if (-not (Test-Path $vbs)) { throw "Missing $vbs after sync" }
 
-foreach ($name in @("WanStudioGpuWatchdog.cmd", "WanStudioCloudflared.cmd")) {
+# Keepalive: at sign-in and every 5 min; start.vbs exits at once if the loop is running
+$action = New-ScheduledTaskAction -Execute "wscript.exe" -Argument "`"$vbs`""
+$triggers = @(
+    (New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME),
+    (New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 5))
+)
+$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+    -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 2)
+Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $triggers -Settings $settings -Force | Out-Null
+
+# Legacy starters ran from inside the repo (fail with a popup while it is locked)
+if (Get-ScheduledTask -TaskName $legacyTask -ErrorAction SilentlyContinue) {
+    Unregister-ScheduledTask -TaskName $legacyTask -Confirm:$false
+}
+foreach ($name in @("WanStudioGpuWatchdog.lnk", "WanStudioGpuWatchdog.cmd", "WanStudioCloudflared.cmd")) {
     $p = Join-Path $startup $name
     if (Test-Path $p) { Remove-Item $p -Force }
 }
 
-Write-Host "Installed login autostart: $lnkPath"
-Write-Host "On every sign-in, the stack starts hidden and heals in the background."
+Write-Host "Installed keepalive task: $taskName (sign-in + every 5 min)"
+Write-Host "The stack starts hidden from $runtime and heals in the background, even with the repo locked."
 Write-Host "Logs: $logFile"
 Write-Host "Disable sleep while you need phone gens from elsewhere."
 

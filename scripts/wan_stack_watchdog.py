@@ -33,6 +33,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import subprocess
 import sys
 import time
@@ -40,8 +41,70 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parents[1]
+
+def _dpapi(data: bytes, protect: bool) -> bytes:
+    """Windows DPAPI (current user) — runtime config is unreadable to other accounts."""
+    import ctypes
+    from ctypes import wintypes
+
+    class _Blob(ctypes.Structure):
+        _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_char))]
+
+    buf = ctypes.create_string_buffer(data, len(data))
+    inp = _Blob(len(data), ctypes.cast(buf, ctypes.POINTER(ctypes.c_char)))
+    out = _Blob()
+    crypt32 = ctypes.windll.crypt32
+    fn = crypt32.CryptProtectData if protect else crypt32.CryptUnprotectData
+    if not fn(ctypes.byref(inp), None, None, None, None, 0x1, ctypes.byref(out)):
+        raise ctypes.WinError()
+    try:
+        return ctypes.string_at(out.pbData, out.cbData)
+    finally:
+        ctypes.windll.kernel32.LocalFree(out.pbData)
+
+
+def _cfg_read(path: Path) -> dict[str, str]:
+    try:
+        return json.loads(_dpapi(path.read_bytes(), protect=False).decode("utf-8"))
+    except Exception:
+        return {}
+
+
+# The repo may be ACL-locked (VaultLock) while the stack runs. A copy of this
+# script + gpu_agent + a DPAPI-encrypted subset of tokens&cmd lives in RUNTIME
+# (hidden, neutral name) so restarts and tunnel healing never need the repo.
+HERE = Path(__file__).resolve().parent
+RUNTIME_CFG_NAME = "cfg.bin"
+RUNTIME_MAIN_NAME = "svc_main.py"
+RUNTIME_AGENT_NAME = "svc_agent.py"
+IN_RUNTIME = (HERE / RUNTIME_CFG_NAME).is_file()
+if IN_RUNTIME:
+    RUNTIME = HERE
+    REPO = Path(_cfg_read(HERE / RUNTIME_CFG_NAME).get("_repo") or HERE)
+else:
+    REPO = HERE.parent
+    RUNTIME = Path(os.environ.get("WAN_RUNTIME_DIR") or (REPO.parent / "svc"))
 TOKENS = REPO / "tokens&cmd"
+RUNTIME_CFG = RUNTIME / RUNTIME_CFG_NAME
+# Only what the heal loop needs — never github/vercel tokens.
+RUNTIME_KEYS = {
+    "render",
+    "gpu_agent_secret",
+    "GPU_COMFY_CMD",
+    "gpu_comfy_cmd",
+    "named_tunnel",
+    "gpu_comfy_url",
+    "COMFYUI_URL",
+    "gpu_agent",
+    "prowler_url",
+    "prowler_pin",
+    "PROWLER_PIN",
+    "prowler_auth_secret",
+    "PROWLER_AUTH_SECRET",
+    "scapper_url",
+    "scapper_url_pushed",
+    "scapper_render_service",
+}
 COMFY_ROOT = Path(r"E:\Comfy-Desktop\ComfyUI-Installs\Khelukhiladi\ComfyUI")
 PROWLER_ROOT = Path(r"D:\prowler")
 PROWLER_API = PROWLER_ROOT / "apps" / "api"
@@ -67,11 +130,38 @@ def log(msg: str) -> None:
     print(f"[watchdog] {msg}", flush=True)
 
 
+def _cfg_write(values: dict[str, str]) -> None:
+    RUNTIME.mkdir(parents=True, exist_ok=True)
+    RUNTIME_CFG.write_bytes(_dpapi(json.dumps(values).encode("utf-8"), protect=True))
+
+
+def _cfg_update(key: str, value: str) -> None:
+    if key not in RUNTIME_KEYS or not RUNTIME_CFG.is_file():
+        return
+    cfg = _cfg_read(RUNTIME_CFG)
+    cfg[key] = value
+    _cfg_write(cfg)
+
+
+def tokens_from_repo() -> bool:
+    try:
+        TOKENS.stat()
+        return True
+    except OSError:
+        return False
+
+
 def load_tokens() -> dict[str, str]:
     out: dict[str, str] = {}
-    if not TOKENS.is_file():
-        raise SystemExit(f"Missing {TOKENS}")
-    for line in TOKENS.read_text(encoding="utf-8", errors="replace").splitlines():
+    try:
+        text = TOKENS.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        cfg = _cfg_read(RUNTIME_CFG)
+        if not cfg:
+            raise SystemExit(f"Cannot read {TOKENS} and no runtime config at {RUNTIME_CFG}")
+        log("tokens&cmd unreadable (repo locked?) — using runtime config")
+        return {k: v for k, v in cfg.items() if not k.startswith("_")}
+    for line in text.splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
@@ -99,7 +189,15 @@ def _upsert_token_file(path: Path, key: str, value: str) -> None:
 
 
 def upsert_token(key: str, value: str) -> None:
-    _upsert_token_file(TOKENS, key, value)
+    try:
+        _upsert_token_file(TOKENS, key, value)
+    except OSError as exc:
+        # Repo locked: keep the in-memory value; Render still gets pushed.
+        log(f"could not write {key} to tokens&cmd: {exc}")
+    try:
+        _cfg_update(key, value)
+    except Exception as exc:
+        log(f"could not write {key} to runtime config: {exc}")
     # Keep Scapper's gitignored tokens file in sync for scapper_url (and shared keys).
     if key == "scapper_url" and SCAPPER_TOKENS != TOKENS:
         try:
@@ -405,7 +503,7 @@ def ensure_named_tunnel(tokens: dict[str, str], procs: dict[str, subprocess.Pope
             capture_output=True,
             creationflags=_no_window_flags(),
         )
-    log_path = REPO / "tmp_test" / "named_tunnel.log"
+    log_path = RUNTIME / "named_tunnel.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_f = open(log_path, "ab", buffering=0)
     procs["named_tunnel"] = subprocess.Popen(
@@ -535,8 +633,8 @@ def ensure_tunnel(
     tokens: dict[str, str],
     procs: dict[str, subprocess.Popen],
 ) -> None:
-    log_path = REPO / "tmp_test" / f"tunnel_{local_port}.log"
-    state_path = REPO / "tmp_test" / f"tunnel_{local_port}.url"
+    log_path = RUNTIME / f"tunnel_{local_port}.log"
+    state_path = RUNTIME / f"tunnel_{local_port}.url"
 
     known = ""
     if state_path.is_file():
@@ -648,9 +746,13 @@ def ensure_gpu_agent(tokens: dict[str, str]) -> None:
         or DEFAULT_COMFY_CMD
     )
     env["GPU_COMFY_URL"] = "http://127.0.0.1:8188"
+    agent = RUNTIME / RUNTIME_AGENT_NAME
+    if not agent.is_file():
+        agent = REPO / "scripts" / "gpu_agent.py"
+    RUNTIME.mkdir(parents=True, exist_ok=True)
     subprocess.Popen(
-        [sys.executable, str(REPO / "scripts" / "gpu_agent.py")],
-        cwd=str(REPO),
+        [sys.executable, str(agent)],
+        cwd=str(RUNTIME),
         env=env,
         creationflags=_no_window_flags(),
     )
@@ -674,10 +776,17 @@ def ensure_trainer() -> None:
             return
     except OSError:
         pass
+    worker = REPO / "scripts" / "character" / "trainer_worker.py"
+    try:
+        worker.stat()
+    except OSError:
+        # Trainer needs the repo (backend package, .env, temp_assets) — wait for unlock.
+        return
     log("trainer worker down — starting…")
-    logf = open(REPO / "tmp_test" / "trainer_worker.log", "a", encoding="utf-8")
+    RUNTIME.mkdir(parents=True, exist_ok=True)
+    logf = open(RUNTIME / "trainer_worker.log", "a", encoding="utf-8")
     subprocess.Popen(
-        [sys.executable, str(REPO / "scripts" / "character" / "trainer_worker.py")],
+        [sys.executable, str(worker)],
         cwd=str(REPO),
         stdout=logf,
         stderr=subprocess.STDOUT,
@@ -784,12 +893,20 @@ def _push_scapper_to_render(tokens: dict[str, str]) -> None:
         SERVICE_ID = prev
 
 
+def _step(name: str, fn, *args, **kwargs) -> None:
+    """Run one heal step; a failure (e.g. repo locked) must not skip tunnel healing."""
+    try:
+        fn(*args, **kwargs)
+    except Exception as exc:
+        log(f"{name} failed: {exc}")
+
+
 def heal_once(tokens: dict[str, str], procs: dict[str, subprocess.Popen]) -> None:
-    ensure_comfy(tokens)
-    ensure_gpu_agent(tokens)
-    ensure_prowler(tokens)
-    ensure_scapper(tokens)
-    ensure_trainer()
+    _step("comfy", ensure_comfy, tokens)
+    _step("gpu_agent", ensure_gpu_agent, tokens)
+    _step("prowler", ensure_prowler, tokens)
+    _step("scapper", ensure_scapper, tokens)
+    _step("trainer", ensure_trainer)
 
     if named_tunnel_mode(tokens):
         # One cloudflared → hostnames for :8000 / :8010 / :8188 / :8799
@@ -818,34 +935,21 @@ def heal_once(tokens: dict[str, str], procs: dict[str, subprocess.Popen]) -> Non
         return
 
     # Legacy: one quick tunnel per port (rate-limited if recreated too often)
-    ensure_tunnel(
-        local_port=8188,
-        state_key="comfy_tunnel",
-        render_env_key="COMFYUI_URL",
-        tokens=tokens,
-        procs=procs,
-    )
-    ensure_tunnel(
-        local_port=8799,
-        state_key="agent_tunnel",
-        render_env_key="GPU_AGENT_URL",
-        tokens=tokens,
-        procs=procs,
-    )
-    ensure_tunnel(
-        local_port=8010,
-        state_key="prowler_tunnel",
-        render_env_key="",
-        tokens=tokens,
-        procs=procs,
-    )
-    ensure_tunnel(
-        local_port=8000,
-        state_key="scapper_tunnel",
-        render_env_key="",
-        tokens=tokens,
-        procs=procs,
-    )
+    for port, key, env_key in (
+        (8188, "comfy_tunnel", "COMFYUI_URL"),
+        (8799, "agent_tunnel", "GPU_AGENT_URL"),
+        (8010, "prowler_tunnel", ""),
+        (8000, "scapper_tunnel", ""),
+    ):
+        _step(
+            f"tunnel :{port}",
+            ensure_tunnel,
+            local_port=port,
+            state_key=key,
+            render_env_key=env_key,
+            tokens=tokens,
+            procs=procs,
+        )
     _push_scapper_to_render(tokens)
 
 
@@ -867,9 +971,9 @@ def _watchdog_already_running() -> bool:
         )
     except Exception:
         return False
-    needle = "wan_stack_watchdog.py"
+    needles = ("wan_stack_watchdog.py", RUNTIME_MAIN_NAME)
     for line in out.splitlines():
-        if "|" not in line or needle not in line:
+        if "|" not in line or not any(n in line for n in needles):
             continue
         raw_pid = line.split("|", 1)[0].strip()
         if raw_pid.isdigit() and int(raw_pid) != me:
@@ -877,9 +981,61 @@ def _watchdog_already_running() -> bool:
     return False
 
 
+_START_VBS = '''' Starts the heal loop hidden unless it is already running.
+Set fso = CreateObject("Scripting.FileSystemObject")
+here = fso.GetParentFolderName(WScript.ScriptFullName)
+Set procs = GetObject("winmgmts:").ExecQuery( _
+  "SELECT ProcessId FROM Win32_Process WHERE CommandLine LIKE '%{main}%' OR CommandLine LIKE '%wan_stack_watchdog.py%'")
+If procs.Count > 0 Then WScript.Quit
+CreateObject("WScript.Shell").Run "cmd /c cd /d """ & here & """ && """ & "{python}" & """ """ & here & "\\{main}"" >> """ & here & "\\svc.log"" 2>&1", 0, False
+'''
+
+
+def _same_bytes(a: Path, b: Path) -> bool:
+    try:
+        return a.read_bytes() == b.read_bytes()
+    except OSError:
+        return False
+
+
+def sync_runtime(tokens: dict[str, str]) -> None:
+    """Refresh the runtime copy (scripts + encrypted tokens) while the repo is readable."""
+    RUNTIME.mkdir(parents=True, exist_ok=True)
+    if sys.platform == "win32":
+        import ctypes
+
+        ctypes.windll.kernel32.SetFileAttributesW(str(RUNTIME), 0x2)  # hidden
+    pairs = (
+        (REPO / "scripts" / "wan_stack_watchdog.py", RUNTIME / RUNTIME_MAIN_NAME),
+        (REPO / "scripts" / "gpu_agent.py", RUNTIME / RUNTIME_AGENT_NAME),
+    )
+    for src, dst in pairs:
+        if not _same_bytes(src, dst):
+            shutil.copyfile(src, dst)
+            log(f"runtime: updated {dst.name}")
+    cfg = {k: v for k, v in tokens.items() if k in RUNTIME_KEYS}
+    cfg["_repo"] = str(REPO)
+    if _cfg_read(RUNTIME_CFG) != cfg:
+        _cfg_write(cfg)
+        log("runtime: updated encrypted config")
+    vbs = _START_VBS.format(main=RUNTIME_MAIN_NAME, python=sys.executable)
+    vbs_path = RUNTIME / "start.vbs"
+    try:
+        current = vbs_path.read_text(encoding="utf-8")
+    except OSError:
+        current = ""
+    if current != vbs:
+        vbs_path.write_text(vbs, encoding="utf-8")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--once", action="store_true")
+    ap.add_argument(
+        "--sync-runtime",
+        action="store_true",
+        help="Only refresh the runtime copy (scripts + encrypted config) and exit",
+    )
     ap.add_argument("--interval", type=int, default=45)
     ap.add_argument(
         "--force",
@@ -888,6 +1044,13 @@ def main() -> int:
     )
     args = ap.parse_args()
 
+    if args.sync_runtime:
+        if not tokens_from_repo():
+            raise SystemExit(f"Cannot read {TOKENS} — unlock the repo first")
+        sync_runtime(ensure_secrets(load_tokens()))
+        log(f"runtime ready at {RUNTIME}")
+        return 0
+
     if not args.once and not args.force and _watchdog_already_running():
         log("another watchdog already running — exit (use --force to override)")
         return 0
@@ -895,6 +1058,11 @@ def main() -> int:
     tokens = ensure_secrets(load_tokens())
     if not (tokens.get("render") or "").strip():
         raise SystemExit("tokens&cmd needs render=<Render API key>")
+    if tokens_from_repo():
+        try:
+            sync_runtime(tokens)
+        except Exception as exc:
+            log(f"runtime sync failed: {exc}")
 
     procs: dict[str, subprocess.Popen] = {}
     log("starting heal loop (leave this PC on / awake)")

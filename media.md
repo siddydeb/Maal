@@ -130,7 +130,7 @@ Gitignore also allows these repo folders (they were **not present** last scan):
 | Path | What |
 |------|------|
 | `E:\Comfy-Desktop\ComfyUI-Installs\Khelukhiladi\ComfyUI\user\` | Comfy logs + UI DB (`comfyui*.log`, `comfyui.db`) — not gens |
-| `D:\YtAuto\contrnt\tmp_test\tunnel_8188.url` (and `.log`) | Cloudflare tunnel URL/log for Comfy `:8188` |
+| `D:\YtAuto\svc\tunnel_8188.url` (and `.log`) | Cloudflare tunnel URL/log for Comfy `:8188` (hidden runtime folder; plus `svc.log`, `trainer_worker.log`) |
 | `D:\YtAuto\contrnt\.env` | Config + secrets — **not** gen media |
 | `D:\YtAuto\contrnt\tokens&cmd` | Deploy tokens — **not** gen media |
 
