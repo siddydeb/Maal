@@ -7,7 +7,7 @@ import {
   uploadTestInput,
 } from "./api";
 
-export default function TestInputs({ onOpenLightbox, onUseInput }) {
+export default function TestInputs({ onOpenLightbox, onUseInput, onUseBackground }) {
   const [items, setItems] = useState([]);
   const [total, setTotal] = useState(0);
   const [status, setStatus] = useState("");
@@ -136,6 +136,17 @@ export default function TestInputs({ onOpenLightbox, onUseInput }) {
                   }
                 >
                   Use
+                </button>
+                <button
+                  type="button"
+                  className="ghost"
+                  disabled={busy}
+                  title="Put a girl into this photo (Text to Image)"
+                  onClick={() =>
+                    onUseBackground?.({ ...item, _testInput: true, kind: "img" })
+                  }
+                >
+                  Background
                 </button>
                 <button
                   type="button"

@@ -822,6 +822,36 @@ export default function App() {
     if (inputRef.current) inputRef.current.value = "";
   }
 
+  function backgroundFromFile(f) {
+    pickBackground(f);
+    setMode("t2i");
+    setView("generation");
+    setStatusError(false);
+    setStatus(
+      "Loaded as background — pick a girl (or New random girl), describe her and the pose. Crowded photo? Drag a box where she goes."
+    );
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  async function useAsBackground(item) {
+    if (!item?.id || usingAsInput) return;
+    setLightbox(null);
+    setBusyId(item.id);
+    setUsingAsInput(true);
+    setStatusError(false);
+    setStatus("Loading background…");
+    try {
+      backgroundFromFile(await fetchMediaAsFile(item));
+    } catch (err) {
+      const s = statusFromErr(err);
+      setStatus(s.text);
+      setStatusError(s.error);
+    } finally {
+      setBusyId(null);
+      setUsingAsInput(false);
+    }
+  }
+
   async function useAsInput(item) {
     if (!item?.id || usingAsInput) return;
     const isVid =
@@ -1480,7 +1510,7 @@ export default function App() {
                         <IconSpark />
                       </span>
                       <strong>Text to Image</strong>
-                      <span className="mode-card-desc">Create a girl from words</span>
+                      <span className="mode-card-desc">Create a girl, or put her in your photo</span>
                     </button>
                   </div>
                 </div>
@@ -1745,16 +1775,27 @@ export default function App() {
                     )}
                   </label>
                   {previewUrl && (
-                    <button
-                      type="button"
-                      className="ghost clear-input"
-                      onClick={(e) => {
-                        e.preventDefault();
-                        clearInput();
-                      }}
-                    >
-                      Clear image
-                    </button>
+                    <div className="t2i-bg-actions">
+                      <button
+                        type="button"
+                        className="ghost clear-input"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          clearInput();
+                        }}
+                      >
+                        Clear image
+                      </button>
+                      {file && (
+                        <button
+                          type="button"
+                          className="ghost"
+                          onClick={() => backgroundFromFile(file)}
+                        >
+                          Put a girl into this photo
+                        </button>
+                      )}
+                    </div>
                   )}
                 </div>
                 )}
@@ -2057,6 +2098,7 @@ export default function App() {
             <TestInputs
               onOpenLightbox={(item) => setLightbox(item)}
               onUseInput={(item) => useAsInput(item)}
+              onUseBackground={(item) => useAsBackground(item)}
             />
           </section>
         )}
@@ -2617,6 +2659,17 @@ export default function App() {
                     onClick={() => useAsInput(lightbox)}
                   >
                     {busyId === lightbox.id ? "using…" : "use as input"}
+                  </button>
+                )}
+                {(lightbox.kind !== "vid" &&
+                  !(lightbox.content_type || "").startsWith("video/")) && (
+                  <button
+                    type="button"
+                    className="ghost"
+                    disabled={busyId === lightbox.id || loading || usingAsInput}
+                    onClick={() => useAsBackground(lightbox)}
+                  >
+                    use as background
                   </button>
                 )}
               </div>
