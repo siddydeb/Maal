@@ -369,6 +369,7 @@ export async function startJob({
   clientKey,
   t2i,
   engine,
+  aspect,
 }) {
   // One key for this tap — retries must not create extra queue entries.
   const idem =
@@ -389,11 +390,12 @@ export async function startJob({
       if (t2i.faceFix === false) body.append("face_fix", "0");
       if (t2i.placeBox) body.append("place_box", t2i.placeBox.map((v) => v.toFixed(4)).join(","));
     }
+    if (mode === "saga" && aspect) body.append("aspect", aspect);
     if (engine) body.append("engine", engine);
     body.append("client_key", idem);
     if (negative) body.append("negative", negative);
     if (seed != null && seed !== "") body.append("seed", String(seed));
-    if (mode === "vid" && videoSeconds != null && videoSeconds !== "") {
+    if ((mode === "vid" || mode === "saga_vid") && videoSeconds != null && videoSeconds !== "") {
       body.append("video_seconds", String(videoSeconds));
     }
     if (presetId) body.append("preset_id", String(presetId));

@@ -44,11 +44,15 @@ export function isTesterOwner() {
   return Boolean(readSession()?.tester);
 }
 
+export function isSagaOwner() {
+  return Boolean(readSession()?.saga);
+}
+
 export function getAccessToken() {
   return readSession()?.token || null;
 }
 
-export function saveSession({ owner, token, admin = false, tester = false }) {
+export function saveSession({ owner, token, admin = false, tester = false, saga = false }) {
   if (!owner || !token) return;
   localStorage.setItem(
     SESSION_KEY,
@@ -57,6 +61,7 @@ export function saveSession({ owner, token, admin = false, tester = false }) {
       token,
       admin: Boolean(admin),
       tester: Boolean(tester),
+      saga: Boolean(saga),
       unlockedAt: Date.now(),
     })
   );

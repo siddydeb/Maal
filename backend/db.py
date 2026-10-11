@@ -72,7 +72,7 @@ def peek_next_queued_job_sync() -> Optional[dict[str, Any]]:
     doc = _sync_jobs().find_one(
         {
             "status": "queued",
-            "$or": [{"input_gridfs_id": {"$ne": None}}, {"mode": "t2i"}],
+            "$or": [{"input_gridfs_id": {"$ne": None}}, {"mode": {"$in": ["t2i", "saga"]}}],
         },
         sort=[("created_at", 1)],
     )
@@ -973,7 +973,7 @@ def _job_age_limits(doc: Optional[dict[str, Any]] = None) -> tuple[int, int]:
     settings = get_settings()
     max_age = max(120, int(settings.comfyui_timeout_sec) + 120)
     # Wan oral I2V can run 60–90+ min; FE/stale sweeps must not kill early.
-    if (doc or {}).get("mode") == "vid":
+    if (doc or {}).get("mode") in ("vid", "saga_vid"):
         max_age = max(max_age, 7200)
     max_wall = max(7200, max_age + 900)
     return max_age, max_wall
@@ -1040,7 +1040,7 @@ async def reclaim_active_jobs_on_startup() -> list[dict[str, Any]]:
                 await delete_job_input(str(oid))
                 continue
 
-        if not doc.get("input_gridfs_id") and doc.get("mode") != "t2i":
+        if not doc.get("input_gridfs_id") and doc.get("mode") not in ("t2i", "saga"):
             await db().jobs.update_one(
                 {"_id": oid, "status": {"$in": ["queued", "running"]}},
                 {
@@ -1179,7 +1179,7 @@ def _serialize_job(doc: dict[str, Any]) -> dict[str, Any]:
         if jid:
             out["input_thumb_url"] = f"/api/jobs/{jid}/input-thumb?w=240"
     else:
-        out["resumable"] = out.get("mode") == "t2i"
+        out["resumable"] = out.get("mode") in ("t2i", "saga")
         out["input_thumb_url"] = None
     return out
 

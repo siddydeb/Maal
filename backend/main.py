@@ -31,6 +31,7 @@ from backend.comfy_client import ComfyClient, ComfyUIError
 from backend.config import get_settings
 from backend.owners import (
     is_admin_owner,
+    is_saga_owner,
     is_tester_owner,
     make_token,
     owner_for_pin,
@@ -455,6 +456,7 @@ async def auth_unlock(body: UnlockBody):
             "owner": owner,
             "admin": is_admin_owner(owner),
             "tester": is_tester_owner(owner),
+            "saga": is_saga_owner(owner),
             "token": token,
             "expires_hours": 24,
         }
@@ -469,6 +471,7 @@ async def auth_me(owner: str = Depends(require_owner)):
             "owner": owner,
             "admin": is_admin_owner(owner),
             "tester": is_tester_owner(owner),
+            "saga": is_saga_owner(owner),
             "unlock_enabled": unlock_enabled(),
         }
     )
@@ -563,7 +566,7 @@ async def generate(
 
 @app.post("/api/jobs")
 async def start_job(
-    mode: Literal["img", "vid", "t2i"] = Form(...),
+    mode: Literal["img", "vid", "t2i", "saga", "saga_vid"] = Form(...),
     prompt: str = Form(...),
     image: Optional[UploadFile] = File(None),
     negative: Optional[str] = Form(None),
@@ -592,11 +595,18 @@ async def start_job(
     engine: t2i "klein" | "flux"; img "klein" (keep-face edit) or empty for the standard engine.
     face_fix: "0" turns off a Klein character's face re-render (on by default).
     place_box: "x0,y0,x1,y1" (fractions) where she goes in the background; for crowded photos.
+    mode=saga / saga_vid belong only to the Saga studio owner (Summertime Saga style):
+    saga takes aspect, saga_vid animates the uploaded still for video_seconds (3 or 5).
     """
     prompt = (prompt or "").strip()
     if not prompt:
         raise HTTPException(400, "Prompt is required")
-    if mode != "t2i" and image is None:
+    is_saga_mode = mode in ("saga", "saga_vid")
+    if is_saga_mode != is_saga_owner(owner):
+        raise HTTPException(403, "This mode is not available for this PIN")
+    if mode == "saga":
+        image = None
+    if mode not in ("t2i", "saga") and image is None:
         raise HTTPException(400, "An image is required for this mode")
     engine = (engine or "").strip().lower() or None
     if engine not in (None, "klein", "flux", "standard"):
@@ -632,6 +642,17 @@ async def start_job(
                 background=t2i_options["background"],
             )
         except t2i_mod.T2IError as exc:
+            raise HTTPException(400, str(exc)) from exc
+    if is_saga_mode:
+        from backend import saga as saga_mod
+
+        try:
+            saga_mod.check_prompt(prompt)
+            if mode == "saga":
+                t2i_options = {"aspect": saga_mod.parse_aspect(aspect)}
+            else:
+                t2i_options = {"seconds": saga_mod.parse_seconds(video_seconds)}
+        except saga_mod.SagaError as exc:
             raise HTTPException(400, str(exc)) from exc
 
     idem = db.normalize_client_key(client_key)
@@ -870,7 +891,27 @@ async def _execute_generation(
     engine_meta: dict = {}
 
     try:
-        if mode == "t2i":
+        if mode in ("saga", "saga_vid"):
+            from backend import saga as saga_mod
+
+            opts = options or {}
+            try:
+                if mode == "saga":
+                    data, content_type, engine_meta = await saga_mod.run_still(
+                        client, prompt_en, seed=seed, aspect=opts.get("aspect")
+                    )
+                else:
+                    assert image_bytes is not None
+                    data, content_type, engine_meta = await saga_mod.run_motion(
+                        client, image_bytes, prompt_en, seed=seed, seconds=opts.get("seconds")
+                    )
+            except saga_mod.SagaError as exc:
+                raise HTTPException(400, str(exc)) from exc
+            kind = "img" if mode == "saga" else "vid"
+            filename = f"wan_{kind}_{uuid.uuid4().hex}." + ("png" if kind == "img" else "mp4")
+            if kind == "vid" and "webm" in content_type:
+                filename = filename.replace(".mp4", ".webm")
+        elif mode == "t2i":
             from backend import t2i as t2i_mod
 
             opts = options or {}
@@ -1013,7 +1054,7 @@ async def _execute_generation(
 async def _resume_persisted_job(job: dict) -> None:
     """Re-run a queued/running job after API worker restart using stored start image."""
     job_id = job["id"]
-    needs_image = (job.get("mode") or "img") != "t2i" or bool(
+    needs_image = (job.get("mode") or "img") not in ("t2i", "saga") or bool(
         (job.get("options") or {}).get("background")
     )
     image_bytes = db.get_job_input_bytes_sync(job_id) if needs_image else None
@@ -1090,7 +1131,7 @@ async def _run_job(
     # Hard ceiling so a hung WS/tunnel cannot leave the job "running" forever.
     # Wan oral I2V can exceed 60 min; keep video wait aligned with Comfy client (2h).
     hard_limit = max(180, int(settings.comfyui_timeout_sec) + 90)
-    if mode == "vid":
+    if mode in ("vid", "saga_vid"):
         hard_limit = max(hard_limit, 7200)
     try:
         # Bail early if cancelled between claim and Comfy submit.
@@ -1280,7 +1321,11 @@ async def eta(_owner: str = Depends(require_owner)):
     img_sec = await db.get_avg_duration_sec("img")
     vid_sec = await db.get_avg_duration_sec("vid")
     t2i_sec = await db.get_avg_duration_sec("t2i")
-    return _json({"img_sec": img_sec, "vid_sec": vid_sec, "t2i_sec": t2i_sec})
+    out = {"img_sec": img_sec, "vid_sec": vid_sec, "t2i_sec": t2i_sec}
+    if is_saga_owner(_owner):
+        out["saga_sec"] = await db.get_avg_duration_sec("saga")
+        out["saga_vid_sec"] = await db.get_avg_duration_sec("saga_vid")
+    return _json(out)
 
 
 @app.get("/api/t2i/config")

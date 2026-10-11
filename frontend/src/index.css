@@ -2097,3 +2097,74 @@ button.gallery-item {
     grid-template-columns: 1fr 1fr;
   }
 }
+
+/* Saga studio (PIN 1000) */
+.saga-ideas {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-top: 0.6rem;
+}
+
+.saga-idea {
+  font-size: 0.8rem;
+  padding: 0.3rem 0.65rem;
+}
+
+.saga-jobs {
+  list-style: none;
+  margin: 1rem 0 0;
+  padding: 0;
+  display: grid;
+  gap: 0.45rem;
+}
+
+.saga-job {
+  display: grid;
+  grid-template-columns: auto 1fr auto auto;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.55rem 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  font-size: 0.86rem;
+}
+
+.saga-job.failed {
+  border-color: var(--danger);
+}
+
+.saga-job-kind {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.saga-job-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+}
+
+.saga-job.failed .saga-job-text {
+  color: var(--danger);
+  white-space: normal;
+}
+
+.saga-job-status {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.saga-animate {
+  display: grid;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+
+.saga-animate-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+}

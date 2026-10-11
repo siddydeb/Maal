@@ -76,6 +76,8 @@ class Settings(BaseSettings):
     wan_admin_owner: str = "u9977"
     # Owner id only (never a PIN). Override with WAN_TESTER_OWNER.
     wan_tester_owner: str = "utester"
+    # Saga studio owner (Summertime Saga style only). Override with WAN_SAGA_OWNER.
+    wan_saga_owner: str = "usaga"
 
     # Ops UI (admin owner only) — restart Render / update tunnel / bounce GPU Comfy
     render_api_key: Optional[str] = None  # RENDER_API_KEY

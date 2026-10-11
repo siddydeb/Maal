@@ -65,6 +65,17 @@ class UnlockLockoutTests(unittest.TestCase):
             self.assertFalse(owners.is_tester_owner("uadmin"))
             self.assertFalse(owners.is_admin_owner("utester"))
 
+    def test_saga_owner_flag(self):
+        from backend import owners
+
+        class _S:
+            wan_saga_owner = "usaga"
+
+        with patch.object(owners, "get_settings", return_value=_S()):
+            self.assertTrue(owners.is_saga_owner("usaga"))
+            self.assertFalse(owners.is_saga_owner("utester"))
+            self.assertFalse(owners.is_saga_owner(None))
+
     def test_bcrypt_match_and_miss(self):
         from backend import owners
 

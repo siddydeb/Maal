@@ -56,6 +56,11 @@ def is_tester_owner(owner: Optional[str]) -> bool:
     return bool(owner) and bool(tester) and owner == tester
 
 
+def is_saga_owner(owner: Optional[str]) -> bool:
+    saga = (get_settings().wan_saga_owner or "").strip()
+    return bool(owner) and bool(saga) and owner == saga
+
+
 def _secret() -> bytes:
     raw = (get_settings().wan_auth_secret or "").strip()
     if not raw:

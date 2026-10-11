@@ -69,6 +69,7 @@ export default function PinGate({ children }) {
         token: data.token,
         admin: Boolean(data.admin),
         tester: Boolean(data.tester),
+        saga: Boolean(data.saga),
       });
       setPin("");
       setUnlocked(true);
