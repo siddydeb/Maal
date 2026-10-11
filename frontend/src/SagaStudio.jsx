@@ -33,6 +33,7 @@ export default function SagaStudio() {
   const [aspect, setAspect] = useState("landscape");
   const [jobs, setJobs] = useState([]);
   const [library, setLibrary] = useState([]);
+  const [libraryTotal, setLibraryTotal] = useState(0);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [viewer, setViewer] = useState(null);
@@ -44,10 +45,21 @@ export default function SagaStudio() {
     try {
       const data = await listGenerations({ limit: 60 });
       setLibrary(data.items);
+      setLibraryTotal(data.total);
     } catch (err) {
       setError(String(err.message || err));
     }
   }, []);
+
+  async function loadMore() {
+    try {
+      const data = await listGenerations({ limit: 60, skip: library.length });
+      setLibrary((prev) => [...prev, ...data.items.filter((x) => !prev.some((p) => p.id === x.id))]);
+      setLibraryTotal(data.total);
+    } catch (err) {
+      setError(String(err.message || err));
+    }
+  }
 
   useEffect(() => {
     refreshLibrary();
@@ -253,7 +265,7 @@ export default function SagaStudio() {
         </section>
 
         <section className="panel view-panel">
-          <h2 className="section-title">Library</h2>
+          <h2 className="section-title">Library{libraryTotal ? ` (${libraryTotal})` : ""}</h2>
           <ul className="gallery">
             {!library.length && <li className="empty gallery-empty">Nothing here yet.</li>}
             {library.map((item) => (
@@ -272,6 +284,11 @@ export default function SagaStudio() {
               </li>
             ))}
           </ul>
+          {library.length < libraryTotal && (
+            <button type="button" className="ghost saga-more" onClick={loadMore}>
+              Load more
+            </button>
+          )}
         </section>
       </main>
 

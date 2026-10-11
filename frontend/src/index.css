@@ -2168,3 +2168,8 @@ button.gallery-item {
   align-items: center;
   gap: 0.75rem;
 }
+
+.saga-more {
+  display: block;
+  margin: 1rem auto 0;
+}
