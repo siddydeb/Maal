@@ -581,6 +581,9 @@ async def start_job(
     engine: Optional[str] = Form(None),
     face_fix: Optional[str] = Form(None),
     place_box: Optional[str] = Form(None),
+    quality: Optional[str] = Form(None),
+    layout: Optional[str] = Form(None),
+    background: Optional[str] = Form(None),
     owner: str = Depends(require_owner),
 ):
     """
@@ -596,7 +599,9 @@ async def start_job(
     face_fix: "0" turns off a Klein character's face re-render (on by default).
     place_box: "x0,y0,x1,y1" (fractions) where she goes in the background; for crowded photos.
     mode=saga / saga_vid belong only to the Saga studio owner (Summertime Saga style):
-    saga takes aspect, saga_vid animates the uploaded still for video_seconds (3 or 5).
+    saga takes aspect, character, outfit ("0" drops her usual clothes), quality ("fast" | "hd"),
+    layout ("scene" | "sprite") and background (sprite backdrop); saga_vid animates the uploaded
+    still for video_seconds (3, 5, 8, 10) at quality ("fast" 832 / "hd" 720p + interpolation).
     """
     prompt = (prompt or "").strip()
     if not prompt:
@@ -649,9 +654,12 @@ async def start_job(
         try:
             saga_mod.check_prompt(prompt)
             if mode == "saga":
-                t2i_options = {"aspect": saga_mod.parse_aspect(aspect)}
+                t2i_options = saga_mod.parse_still_options(
+                    aspect=aspect, character=character, outfit=outfit, quality=quality,
+                    layout=layout, background=background,
+                )
             else:
-                t2i_options = {"seconds": saga_mod.parse_seconds(video_seconds)}
+                t2i_options = saga_mod.parse_motion_options(seconds=video_seconds, quality=quality)
         except saga_mod.SagaError as exc:
             raise HTTPException(400, str(exc)) from exc
 
@@ -898,12 +906,12 @@ async def _execute_generation(
             try:
                 if mode == "saga":
                     data, content_type, engine_meta = await saga_mod.run_still(
-                        client, prompt_en, seed=seed, aspect=opts.get("aspect")
+                        client, prompt_en, seed=seed, options=opts
                     )
                 else:
                     assert image_bytes is not None
                     data, content_type, engine_meta = await saga_mod.run_motion(
-                        client, image_bytes, prompt_en, seed=seed, seconds=opts.get("seconds")
+                        client, image_bytes, prompt_en, seed=seed, options=opts
                     )
             except saga_mod.SagaError as exc:
                 raise HTTPException(400, str(exc)) from exc
@@ -1335,6 +1343,20 @@ async def t2i_config(_owner: str = Depends(require_owner)):
 
     installed = await t2i_mod.installed_loras(_comfy())
     return _json(t2i_mod.public_config(t2i_mod.load_config(), installed))
+
+
+@app.get("/api/saga/config")
+async def saga_config(_owner: str = Depends(require_owner)):
+    """Characters (installed on the GPU box), aspects and clip lengths for the Saga studio."""
+    if not is_saga_owner(_owner):
+        raise HTTPException(403, "This mode is not available for this PIN")
+    from backend import saga as saga_mod
+
+    try:
+        installed = await _comfy().lora_names()
+    except Exception:
+        installed = None
+    return _json(saga_mod.public_config(installed))
 
 
 def _training_http(exc: Exception) -> HTTPException:

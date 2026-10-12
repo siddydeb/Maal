@@ -132,6 +132,14 @@ export async function getT2iConfig() {
   return readJson(res);
 }
 
+export async function getSagaConfig() {
+  const res = await fetch(url("/api/saga/config"), {
+    headers: authHeaders(),
+    cache: "no-store",
+  });
+  return readJson(res);
+}
+
 export async function listReviewBins() {
   const res = await fetch(url("/api/test/review-bins"), {
     headers: authHeaders(),
@@ -369,7 +377,7 @@ export async function startJob({
   clientKey,
   t2i,
   engine,
-  aspect,
+  saga,
 }) {
   // One key for this tap — retries must not create extra queue entries.
   const idem =
@@ -390,7 +398,14 @@ export async function startJob({
       if (t2i.faceFix === false) body.append("face_fix", "0");
       if (t2i.placeBox) body.append("place_box", t2i.placeBox.map((v) => v.toFixed(4)).join(","));
     }
-    if (mode === "saga" && aspect) body.append("aspect", aspect);
+    if ((mode === "saga" || mode === "saga_vid") && saga) {
+      if (saga.aspect) body.append("aspect", saga.aspect);
+      if (saga.character) body.append("character", saga.character);
+      if (saga.outfit === false) body.append("outfit", "0");
+      if (saga.quality) body.append("quality", saga.quality);
+      if (saga.layout) body.append("layout", saga.layout);
+      if (saga.background) body.append("background", saga.background);
+    }
     if (engine) body.append("engine", engine);
     body.append("client_key", idem);
     if (negative) body.append("negative", negative);

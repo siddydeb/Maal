@@ -15,7 +15,7 @@ import json
 import random
 import uuid
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 from urllib.parse import urlencode, urlparse
 
 import httpx
@@ -34,6 +34,9 @@ from backend.workflows_wan import (
 
 class ComfyUIError(RuntimeError):
     pass
+
+
+COMFY_UNRESPONSIVE_GRACE_SEC = 180.0
 
 
 # --- ComfyClient helpers live on the class below ---
@@ -385,6 +388,7 @@ class ComfyClient:
         loras_low: Optional[list] = None,
         high_noise_fraction: Optional[float] = None,
         wait_timeout: Optional[float] = None,
+        graph_hook: Optional[Callable[[dict[str, Any]], dict[str, Any]]] = None,
     ) -> tuple[bytes, str]:
         seed = seed if seed is not None else random.randint(0, 2**32 - 1)
         max_w = width or self.settings.video_width
@@ -416,6 +420,8 @@ class ComfyClient:
                 loras_low=list(loras_low or []),
                 high_noise_fraction=high_noise_fraction,
             )
+            if graph_hook is not None:
+                workflow = graph_hook(workflow)
             return await self._run_and_fetch(
                 workflow,
                 prefer=("videos", "gifs", "images"),
@@ -492,6 +498,7 @@ class ComfyClient:
         limit = float(timeout) if timeout is not None else float(self.timeout)
         deadline = asyncio.get_event_loop().time() + max(60.0, limit)
         last_err: Optional[BaseException] = None
+        down_since: Optional[float] = None
 
         while True:
             remaining = deadline - asyncio.get_event_loop().time()
@@ -527,10 +534,16 @@ class ComfyClient:
                         except asyncio.TimeoutError:
                             if await self._prompt_finished(prompt_id):
                                 return
-                            if not await self.health():
-                                raise ComfyUIError(
-                                    "Lost ComfyUI while waiting (tunnel or Comfy down)."
-                                )
+                            now = asyncio.get_event_loop().time()
+                            if await self.health(timeout=10.0):
+                                down_since = None
+                            else:
+                                # Comfy stops answering HTTP for minutes while it pages a 14B model in.
+                                down_since = down_since or now
+                                if now - down_since > COMFY_UNRESPONSIVE_GRACE_SEC:
+                                    raise ComfyUIError(
+                                        "Lost ComfyUI while waiting (tunnel or Comfy down)."
+                                    )
                             continue
                         if isinstance(raw, bytes):
                             continue
@@ -559,7 +572,14 @@ class ComfyClient:
             except Exception as exc:
                 last_err = exc
                 name = type(exc).__name__
-                if "ConnectionClosed" not in name and "ConnectionReset" not in name:
+                now = asyncio.get_event_loop().time()
+                dropped = "ConnectionClosed" in name or "ConnectionReset" in name
+                if not dropped and isinstance(exc, (asyncio.TimeoutError, TimeoutError, OSError)):
+                    # WS open timed out / refused while Comfy is busy — same grace as failed health probes.
+                    down_since = down_since or now
+                    if now - down_since > COMFY_UNRESPONSIVE_GRACE_SEC:
+                        raise ComfyUIError(f"ComfyUI wait failed: {name}: {exc}") from exc
+                elif not dropped:
                     # Unknown hard failure — still try history once before giving up.
                     if await self._prompt_finished(prompt_id):
                         return

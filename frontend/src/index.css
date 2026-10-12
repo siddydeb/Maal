@@ -609,7 +609,8 @@ textarea:focus {
 }
 
 .t2i-field select,
-.t2i-seed input {
+.t2i-seed input,
+.saga-bg-input {
   width: 100%;
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
@@ -2164,9 +2165,18 @@ button.gallery-item {
 
 .saga-animate-row {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   align-items: center;
   gap: 0.75rem;
+}
+
+.saga-bg-input {
+  margin: 0.5rem 0;
+}
+
+.section .train-auto {
+  margin-top: 0.6rem;
 }
 
 .saga-more {

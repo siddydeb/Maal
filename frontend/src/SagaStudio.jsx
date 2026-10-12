@@ -5,6 +5,7 @@ import {
   downloadGeneration,
   fetchMediaAsFile,
   getJob,
+  getSagaConfig,
   listActiveJobs,
   listGenerations,
   mediaUrl,
@@ -20,12 +21,47 @@ const ASPECTS = [
   ["portrait", "Portrait"],
   ["square", "Square"],
 ];
+const QUALITIES = [
+  ["hd", "HD"],
+  ["fast", "Fast"],
+];
+const LAYOUTS = [
+  ["scene", "Scene"],
+  ["sprite", "Game sprite"],
+];
+const VIDEO_QUALITIES = [
+  ["smooth", "Smooth"],
+  ["hd", "720p (slow)"],
+];
 const IDEAS = [
   "a 40 year old blonde woman in an apron, standing in a sunny suburban kitchen, hand on hip, warm smile",
   "a 24 year old woman with long black hair in a red bikini on a sunny beach, waving at the viewer",
   "a 30 year old librarian with glasses and a bun, leaning on the library desk, playful smile",
   "a 27 year old redhead in black lingerie sitting on a bed at night, bedside lamp, looking at the viewer",
 ];
+const CHAR_IDEAS = [
+  "standing in a sunny suburban kitchen, hand on hip, warm smile, looking at viewer",
+  "sitting on a living room couch at night, relaxed smile, lamp light",
+  "on a sunny beach in a swimsuit, waving at the viewer",
+];
+const BACKGROUND_IDEAS = ["suburban kitchen, morning light", "living room at night", "school hallway", "sunny beach"];
+
+function Segment({ label, options, value, onChange }) {
+  return (
+    <div className="seg" role="tablist" aria-label={label}>
+      {options.map(([key, text]) => (
+        <button
+          key={key}
+          type="button"
+          className={`seg-btn${value === key ? " active" : ""}`}
+          onClick={() => onChange(key)}
+        >
+          {text}
+        </button>
+      ))}
+    </div>
+  );
+}
 const isVideo = (item) => item?.kind === "vid" || (item?.content_type || "").startsWith("video/");
 
 export default function SagaStudio() {
@@ -39,7 +75,16 @@ export default function SagaStudio() {
   const [viewer, setViewer] = useState(null);
   const [motion, setMotion] = useState("");
   const [seconds, setSeconds] = useState(5);
+  const [videoQuality, setVideoQuality] = useState("smooth");
+  const [characters, setCharacters] = useState([]);
+  const [character, setCharacter] = useState("");
+  const [outfit, setOutfit] = useState(true);
+  const [quality, setQuality] = useState("hd");
+  const [layout, setLayout] = useState("scene");
+  const [background, setBackground] = useState("");
   const pollRef = useRef(null);
+  const picked = characters.find((c) => c.id === character);
+  const ideas = character ? CHAR_IDEAS : IDEAS;
 
   const refreshLibrary = useCallback(async () => {
     try {
@@ -63,6 +108,9 @@ export default function SagaStudio() {
 
   useEffect(() => {
     refreshLibrary();
+    getSagaConfig()
+      .then((cfg) => setCharacters(cfg.characters || []))
+      .catch(() => {});
     listActiveJobs()
       .then((data) => setJobs(data.items.map((j) => ({ id: j.id, mode: j.mode, status: j.status, prompt: j.prompt }))))
       .catch(() => {});
@@ -111,7 +159,21 @@ export default function SagaStudio() {
     e.preventDefault();
     const text = prompt.trim();
     if (!text) return;
-    await enqueue({ mode: "saga", prompt: text, aspect }, text);
+    const sprite = layout === "sprite";
+    if (sprite && !background.trim()) {
+      setError("Game sprite mode needs a background — say where she stands.");
+      return;
+    }
+    const saga = {
+      aspect,
+      character: character || undefined,
+      outfit: character ? outfit : undefined,
+      quality,
+      layout,
+      background: sprite ? background.trim() : undefined,
+    };
+    const label = picked ? `${picked.label}: ${text}` : text;
+    await enqueue({ mode: "saga", prompt: text, saga }, label);
   }
 
   async function onAnimate() {
@@ -126,7 +188,10 @@ export default function SagaStudio() {
       setBusy(false);
       return;
     }
-    const ok = await enqueue({ mode: "saga_vid", prompt: text, file, videoSeconds: seconds }, `Animate: ${text}`);
+    const ok = await enqueue(
+      { mode: "saga_vid", prompt: text, file, videoSeconds: seconds, saga: { quality: videoQuality } },
+      `Animate: ${text}`
+    );
     if (ok) {
       setViewer(null);
       setMotion("");
@@ -179,9 +244,31 @@ export default function SagaStudio() {
 
         <section className="panel view-panel">
           <form className="form" onSubmit={onGenerate}>
+            {characters.length > 0 && (
+              <div className="section">
+                <label className="t2i-field">
+                  <span>Character</span>
+                  <select value={character} onChange={(e) => setCharacter(e.target.value)}>
+                    <option value="">Original (describe her)</option>
+                    {characters.map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                {picked && (
+                  <label className="train-auto">
+                    <input type="checkbox" checked={outfit} onChange={(e) => setOutfit(e.target.checked)} />
+                    <span>Her usual outfit ({picked.outfit})</span>
+                  </label>
+                )}
+              </div>
+            )}
+
             <div className="section">
               <div className="section-head">
-                <h2 className="section-title">Describe the scene</h2>
+                <h2 className="section-title">{picked ? `What is ${picked.label} doing?` : "Describe the scene"}</h2>
                 <span className="char-count">
                   {prompt.length}/{PROMPT_MAX}
                 </span>
@@ -190,12 +277,16 @@ export default function SagaStudio() {
                 className="prompt-area"
                 rows={4}
                 maxLength={PROMPT_MAX}
-                placeholder="e.g. a 35 year old woman with short red hair in a green sweater, reading on a park bench in autumn, smiling at the viewer…"
+                placeholder={
+                  picked
+                    ? "e.g. standing in the kitchen holding a coffee mug, warm smile, morning light…"
+                    : "e.g. a 35 year old woman with short red hair in a green sweater, reading on a park bench in autumn, smiling at the viewer…"
+                }
                 value={prompt}
                 onChange={(e) => setPrompt(e.target.value.slice(0, PROMPT_MAX))}
               />
               <div className="saga-ideas">
-                {IDEAS.map((idea) => (
+                {ideas.map((idea) => (
                   <button key={idea} type="button" className="ghost saga-idea" onClick={() => setPrompt(idea)}>
                     {idea.split(",")[0]}
                   </button>
@@ -203,24 +294,48 @@ export default function SagaStudio() {
               </div>
             </div>
 
+            {layout === "sprite" && (
+              <div className="section">
+                <h2 className="section-title">Background (where she stands)</h2>
+                <input
+                  className="saga-bg-input"
+                  type="text"
+                  maxLength={200}
+                  placeholder="e.g. suburban kitchen, morning light"
+                  value={background}
+                  onChange={(e) => setBackground(e.target.value)}
+                />
+                <div className="saga-ideas">
+                  {BACKGROUND_IDEAS.map((idea) => (
+                    <button key={idea} type="button" className="ghost saga-idea" onClick={() => setBackground(idea)}>
+                      {idea}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
             <div className="section">
               <div className="setting-row">
                 <div className="setting-label">
                   <span>Shape</span>
                   <span className="setting-hint">Landscape matches the game screen</span>
                 </div>
-                <div className="seg" role="tablist" aria-label="Shape">
-                  {ASPECTS.map(([key, label]) => (
-                    <button
-                      key={key}
-                      type="button"
-                      className={`seg-btn${aspect === key ? " active" : ""}`}
-                      onClick={() => setAspect(key)}
-                    >
-                      {label}
-                    </button>
-                  ))}
+                <Segment label="Shape" options={ASPECTS} value={aspect} onChange={setAspect} />
+              </div>
+              <div className="setting-row">
+                <div className="setting-label">
+                  <span>Quality</span>
+                  <span className="setting-hint">HD: sharper, bigger, faces and hands cleaned up</span>
                 </div>
+                <Segment label="Quality" options={QUALITIES} value={quality} onChange={setQuality} />
+              </div>
+              <div className="setting-row">
+                <div className="setting-label">
+                  <span>Layout</span>
+                  <span className="setting-hint">Game sprite: cut-out character on a game background</span>
+                </div>
+                <Segment label="Layout" options={LAYOUTS} value={layout} onChange={setLayout} />
               </div>
             </div>
 
@@ -229,7 +344,9 @@ export default function SagaStudio() {
                 <span>{busy ? "Queuing…" : "Generate image"}</span>
                 {busy && <span className="spinner" />}
               </span>
-              <span className="go-sub">about 30 seconds · tap any image to animate it</span>
+              <span className="go-sub">
+                {quality === "hd" ? "about 1–2 minutes" : "about 30 seconds"} · tap any image to animate it
+              </span>
             </button>
             {error && <p className="status error">{error}</p>}
           </form>
@@ -327,23 +444,30 @@ export default function SagaStudio() {
                   onChange={(e) => setMotion(e.target.value.slice(0, PROMPT_MAX))}
                 />
                 <div className="saga-animate-row">
-                  <div className="seg" role="tablist" aria-label="Length">
-                    {[3, 5].map((s) => (
-                      <button
-                        key={s}
-                        type="button"
-                        className={`seg-btn${seconds === s ? " active" : ""}`}
-                        onClick={() => setSeconds(s)}
-                      >
-                        {s}s
-                      </button>
-                    ))}
-                  </div>
+                  <Segment
+                    label="Length"
+                    options={(videoQuality === "hd" ? [3, 5] : [3, 5, 8, 10]).map((s) => [s, `${s}s`])}
+                    value={seconds}
+                    onChange={setSeconds}
+                  />
+                  <Segment
+                    label="Video quality"
+                    options={VIDEO_QUALITIES}
+                    value={videoQuality}
+                    onChange={(q) => {
+                      setVideoQuality(q);
+                      if (q === "hd" && seconds > 5) setSeconds(5);
+                    }}
+                  />
                   <button type="button" className="action" disabled={busy} onClick={onAnimate}>
                     {busy ? "Queuing…" : "Animate"}
                   </button>
                 </div>
-                <p className="setting-hint">About 3–5 minutes on the GPU</p>
+                <p className="setting-hint">
+                  {videoQuality === "hd"
+                    ? "720p, 32 fps · about 15–20 minutes"
+                    : `32 fps${seconds > 5 ? " · two chained clips" : ""} · about ${seconds > 5 ? "8–11" : "4–6"} minutes`}
+                </p>
               </div>
             )}
           </div>
