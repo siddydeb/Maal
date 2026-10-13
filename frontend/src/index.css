@@ -2189,6 +2189,14 @@ button.gallery-item {
   border: 1px solid var(--line);
 }
 
+.saga-checker {
+  background: repeating-conic-gradient(#3a3a3a 0% 25%, #2a2a2a 0% 50%) 50% / 16px 16px;
+}
+
+.saga-photo-preview.saga-checker {
+  object-fit: contain;
+}
+
 .saga-photo-side {
   display: flex;
   flex-direction: column;

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import unittest
+from io import BytesIO
 
 from backend import saga
 
@@ -166,6 +167,67 @@ class GraphTests(unittest.TestCase):
         asyncio.run(saga.run_still(_Client(), "woman laughing", seed=3, options={"strength": "strong"},
                                    image_bytes=src.getvalue()))
         self.assertEqual(graphs[1][0]["8"]["inputs"]["denoise"], saga.STRENGTHS["strong"])
+
+    def test_part_options(self):
+        with self.assertRaises(saga.SagaError):
+            saga.parse_still_options(layout="part")
+        self.assertEqual(saga.parse_still_options(layout="part", photo=True)["strength"], "light")
+
+    def test_part_round_trip_keeps_canvas_and_alpha(self):
+        from PIL import Image
+
+        src = Image.new("RGBA", (301, 517), (0, 0, 0, 0))
+        src.paste((200, 150, 120, 255), (60, 90, 240, 400))
+        buf = BytesIO()
+        src.save(buf, format="PNG")
+        png, w16, h16, plan = saga.prepare_part(buf.getvalue())
+        self.assertEqual((w16 % 16, h16 % 16, max(w16, h16)), (0, 0, saga.PHOTO_BOX))
+        prepared = Image.open(BytesIO(png))
+        self.assertEqual(prepared.mode, "RGB")
+        corner = prepared.getpixel((2, 2))
+        self.assertTrue(all(abs(v - t) <= 2 for v, t in zip(corner, (200, 150, 120))), corner)
+
+        hd = prepared.resize((round(w16 * 1.5), round(h16 * 1.5)))
+        out_buf = BytesIO()
+        hd.save(out_buf, format="PNG")
+        out = Image.open(BytesIO(saga.finish_part(out_buf.getvalue(), plan)))
+        self.assertEqual((out.mode, out.size), ("RGBA", (301, 517)))
+        self.assertEqual(list(out.getchannel("A").getdata()), list(src.getchannel("A").getdata()))
+
+    def test_part_without_alpha_stays_opaque(self):
+        from PIL import Image
+
+        buf = BytesIO()
+        Image.new("RGB", (200, 120), (10, 20, 30)).save(buf, format="PNG")
+        png, _, _, plan = saga.prepare_part(buf.getvalue())
+        out = Image.open(BytesIO(saga.finish_part(png, plan)))
+        self.assertEqual((out.mode, out.size), ("RGB", (200, 120)))
+
+    def test_run_still_part(self):
+        from PIL import Image
+
+        graphs = []
+
+        class _Client:
+            async def _upload_image(self, data):
+                return "part.png"
+
+            async def _run_and_fetch(self, graph, prefer, input_name):
+                graphs.append(graph)
+                out = BytesIO()
+                Image.new("RGB", (96, 160), (90, 90, 90)).save(out, format="PNG")
+                return out.getvalue(), "image/png"
+
+        src = BytesIO()
+        Image.new("RGBA", (300, 500), (255, 0, 0, 0)).save(src, format="PNG")
+        data, _, meta = asyncio.run(saga.run_still(_Client(), "left hand, open palm", seed=3,
+                                                   options={"layout": "part"}, image_bytes=src.getvalue()))
+        graph = graphs[0]
+        self.assertEqual(graph["8"]["inputs"]["denoise"], saga.STRENGTHS["light"])
+        self.assertTrue(graph["5"]["inputs"]["text"].endswith("left hand, open palm, " + saga.PART_SUFFIX))
+        self.assertEqual(Image.open(BytesIO(data)).size, (300, 500))
+        self.assertEqual((meta["saga"]["kind"], meta["saga"]["transparent"], meta["saga"]["width"]),
+                         ("part", True, 300))
 
     def test_cutout_graph(self):
         g = saga.build_still_graph("x", seed=1, width=768, height=1344, cutout=True)

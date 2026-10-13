@@ -23,7 +23,7 @@ from pathlib import Path
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
-from PIL import Image
+from PIL import Image, ImageOps
 
 from backend import db
 from backend import scrub as scrub_mod
@@ -316,13 +316,16 @@ def _ai_engine_health_blob() -> dict:
         return {"health_error": str(exc)}
 
 
-async def _read_image_bytes(file: UploadFile) -> bytes:
+async def _read_image_bytes(file: UploadFile, *, keep_alpha: bool = False) -> bytes:
     raw = await file.read()
     if not raw:
         raise HTTPException(400, "Empty image upload")
     try:
         img = Image.open(io.BytesIO(raw))
-        img = img.convert("RGB")
+        if keep_alpha:
+            img = ImageOps.exif_transpose(img)
+        has_alpha = "A" in img.getbands() or "transparency" in img.info
+        img = img.convert("RGBA" if keep_alpha and has_alpha else "RGB")
         buf = io.BytesIO()
         img.save(buf, format="PNG")
         out = buf.getvalue()
@@ -697,7 +700,7 @@ async def start_job(
     )
     if is_tester_owner(owner):
         is_test = True
-    image_bytes = await _read_image_bytes(image) if image is not None else None
+    image_bytes = await _read_image_bytes(image, keep_alpha=mode == "saga") if image is not None else None
     client = _comfy()
     settings = get_settings()
     if not await client.health(timeout=12.0, retries=3):

@@ -43,7 +43,7 @@ ASPECTS = {
     "square": (1024, 1024),
 }
 QUALITIES = ("fast", "hd")
-LAYOUTS = ("scene", "sprite")
+LAYOUTS = ("scene", "sprite", "part")
 # Photo restyle: how much of the uploaded photo gets redrawn (img2img denoise).
 STRENGTHS = {"light": 0.5, "medium": 0.65, "strong": 0.8}
 # Without a description the prompt can't pin down the content, so higher denoise invents new scenes.
@@ -65,6 +65,7 @@ NEGATIVE = (
 SPRITE_SUFFIX = ", solo, full body, standing, simple background, white background, no shadow"
 SPRITE_NEGATIVE = NEGATIVE + ", shadow, drop shadow, floor, ground, reflection"
 BACKGROUND_PREFIX = "no humans, scenery, detailed background, "
+PART_SUFFIX = "simple background"
 BACKGROUND_NEGATIVE = NEGATIVE + ", 1girl, 1boy, person, people, humans, character"
 HAND_PROMPT = "detailed hands, five fingers, well-drawn fingers"
 MOTION_PREFIX = "2D cartoon animation in the same art style, "
@@ -197,6 +198,8 @@ def parse_still_options(
     if char and char not in CHARACTERS:
         raise SagaError(f"Unknown character '{character}'")
     lay = _pick(layout, LAYOUTS, "scene", "layout")
+    if lay == "part" and not photo:
+        raise SagaError("Part mode needs the part image (face, hand, body…)")
     bg = (background or "").strip() or None
     if lay == "sprite":
         if not bg and not photo:
@@ -213,7 +216,7 @@ def parse_still_options(
     }
     if photo:
         opts["photo"] = True
-        opts["strength"] = _pick(strength, STRENGTHS, "medium", "strength")
+        opts["strength"] = _pick(strength, STRENGTHS, "light" if lay == "part" else "medium", "strength")
     return opts
 
 
@@ -231,6 +234,66 @@ def prepare_photo(image_bytes: bytes, box: int = PHOTO_BOX) -> tuple[bytes, int,
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return buf.getvalue(), w16, h16
+
+
+def _bleed(rgba: Any) -> Any:
+    """Fill transparent pixels by smearing the nearest opaque colours outward (push-pull pyramid).
+    A flat fill leaves a hard silhouette edge that the style model outlines with a dark line."""
+    import cv2
+    import numpy as np
+    from PIL import Image
+
+    arr = np.asarray(rgba, dtype=np.float32) / 255.0
+    alpha = arr[..., 3:4]
+    levels = [(arr[..., :3] * alpha, alpha)]
+    while min(levels[-1][1].shape[:2]) > 2:
+        c, a = levels[-1]
+        size = (max(1, c.shape[1] // 2), max(1, c.shape[0] // 2))
+        levels.append((cv2.resize(c, size, interpolation=cv2.INTER_AREA),
+                       cv2.resize(a, size, interpolation=cv2.INTER_AREA).reshape(size[1], size[0], 1)))
+    c, a = levels[-1]
+    fill = c / np.maximum(a, 1e-6) * (a > 0) + 0.5 * (a <= 0)
+    for c, a in reversed(levels[:-1]):
+        up = cv2.resize(fill, (c.shape[1], c.shape[0]), interpolation=cv2.INTER_LINEAR)
+        fill = c + up * (1.0 - a)
+    return Image.fromarray(np.clip(fill * 255.0 + 0.5, 0, 255).astype(np.uint8), "RGB")
+
+
+def prepare_part(image_bytes: bytes, box: int = PHOTO_BOX) -> tuple[bytes, int, int, dict[str, Any]]:
+    """A character part (face, hand…) scaled to fill box and padded (never cropped) to multiples of 16,
+    with transparent areas and padding filled by _bleed. The plan lets finish_part restore the exact
+    original canvas and transparency."""
+    from PIL import Image, ImageOps
+
+    rgba = ImageOps.exif_transpose(Image.open(io.BytesIO(image_bytes))).convert("RGBA")
+    alpha = rgba.getchannel("A")
+    scale = box / max(rgba.size)
+    w, h = max(1, round(rgba.width * scale)), max(1, round(rgba.height * scale))
+    w16, h16 = max(16, -(-w // 16) * 16), max(16, -(-h // 16) * 16)
+    left, top = (w16 - w) // 2, (h16 - h) // 2
+    canvas = Image.new("RGBA", (w16, h16), (0, 0, 0, 0))
+    canvas.paste(rgba.resize((w, h), Image.Resampling.LANCZOS), (left, top))
+    buf = io.BytesIO()
+    _bleed(canvas).save(buf, format="PNG")
+    plan = {"size": rgba.size, "canvas": (w16, h16), "inner": (left, top, w, h),
+            "alpha": alpha if alpha.getextrema()[0] < 255 else None}
+    return buf.getvalue(), w16, h16, plan
+
+
+def finish_part(data: bytes, plan: dict[str, Any]) -> bytes:
+    """Undo prepare_part: drop the padding, return to the original size, re-apply the original alpha."""
+    from PIL import Image
+
+    out = Image.open(io.BytesIO(data)).convert("RGB")
+    sx, sy = out.width / plan["canvas"][0], out.height / plan["canvas"][1]
+    left, top, w, h = plan["inner"]
+    out = out.crop((round(left * sx), round(top * sy), round((left + w) * sx), round((top + h) * sy)))
+    out = out.resize(plan["size"], Image.Resampling.LANCZOS)
+    if plan["alpha"] is not None:
+        out.putalpha(plan["alpha"])
+    buf = io.BytesIO()
+    out.save(buf, format="PNG")
+    return buf.getvalue()
 
 
 def parse_motion_options(*, seconds: Optional[Any] = None, quality: Optional[str] = None) -> dict[str, Any]:
@@ -407,13 +470,22 @@ async def run_still(
     seed = seed if seed is not None else random.randint(0, 2**32 - 1)
     hd = opts["quality"] == "hd"
     width, height = ASPECTS[opts["aspect"]]
-    photo = None
-    if image_bytes is not None:
+    photo, plan = None, None
+    if opts["layout"] == "part":
+        photo, pw, ph, plan = prepare_part(image_bytes)
+    elif image_bytes is not None:
         photo, pw, ph = prepare_photo(image_bytes)
+
     def denoise_for(described: bool) -> float:
         return (STRENGTHS if described else BLANK_STRENGTHS)[opts["strength"]] if photo else 1.0
 
-    if opts["layout"] == "sprite":
+    if plan:
+        subject = ", ".join(p for p in (character_prompt(text, opts["character"], opts["outfit"]), PART_SUFFIX) if p)
+        out = await _render(client, lambda n: build_still_graph(
+            subject, seed=seed, width=pw, height=ph, character=opts["character"], hd=hd,
+            source_image=n, denoise=denoise_for(bool(text))), photo)
+        data, ctype = finish_part(out, plan), "image/png"
+    elif opts["layout"] == "sprite":
         sw, sh = ASPECTS["portrait"]
         subject = character_prompt(text or "standing, smiling, looking at viewer", opts["character"], opts["outfit"])
         sprite = await _render(client, lambda _n: build_still_graph(
@@ -434,13 +506,17 @@ async def run_still(
             subject, seed=seed, width=width, height=height, character=opts["character"], hd=hd,
             source_image=n, denoise=denoise_for(bool(text))), photo)
         ctype = "image/png"
-    if hd:
+    if plan:
+        width, height = plan["size"]
+    elif hd:
         width, height = _snap(width * HD_SCALE), _snap(height * HD_SCALE)
     label = f"{ANIMA_UNET}+{STYLE_LORA}" + (f"+{char_lora(opts['character'])}" if opts["character"] else "")
     meta = {"kind": "still", "aspect": opts["aspect"], "width": width, "height": height,
             "character": opts["character"], "quality": opts["quality"], "layout": opts["layout"]}
     if photo:
         meta.update(kind="photo", aspect="photo", strength=opts["strength"])
+    if plan:
+        meta.update(kind="part", transparent=plan["alpha"] is not None)
     return data, ctype, {"model_label": label, "seed_used": seed, "saga": meta}
 
 
