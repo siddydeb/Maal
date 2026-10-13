@@ -584,6 +584,7 @@ async def start_job(
     quality: Optional[str] = Form(None),
     layout: Optional[str] = Form(None),
     background: Optional[str] = Form(None),
+    strength: Optional[str] = Form(None),
     owner: str = Depends(require_owner),
 ):
     """
@@ -600,17 +601,17 @@ async def start_job(
     place_box: "x0,y0,x1,y1" (fractions) where she goes in the background; for crowded photos.
     mode=saga / saga_vid belong only to the Saga studio owner (Summertime Saga style):
     saga takes aspect, character, outfit ("0" drops her usual clothes), quality ("fast" | "hd"),
-    layout ("scene" | "sprite") and background (sprite backdrop); saga_vid animates the uploaded
-    still for video_seconds (3, 5, 8, 10) at quality ("fast" 832 / "hd" 720p + interpolation).
+    layout ("scene" | "sprite") and background (sprite backdrop). An image sent with saga is a photo:
+    scene restyles it (prompt optional), sprite uses it as the backdrop; strength "light" | "medium" |
+    "strong". saga_vid animates the uploaded still for video_seconds (3, 5, 8, 10) at quality
+    ("smooth" 832 / "hd" 720p, both interpolated to 32 fps).
     """
     prompt = (prompt or "").strip()
-    if not prompt:
-        raise HTTPException(400, "Prompt is required")
     is_saga_mode = mode in ("saga", "saga_vid")
     if is_saga_mode != is_saga_owner(owner):
         raise HTTPException(403, "This mode is not available for this PIN")
-    if mode == "saga":
-        image = None
+    if not prompt and not (mode == "saga" and image is not None):
+        raise HTTPException(400, "Prompt is required")
     if mode not in ("t2i", "saga") and image is None:
         raise HTTPException(400, "An image is required for this mode")
     engine = (engine or "").strip().lower() or None
@@ -652,11 +653,11 @@ async def start_job(
         from backend import saga as saga_mod
 
         try:
-            saga_mod.check_prompt(prompt)
+            saga_mod.check_prompt(prompt, allow_empty=mode == "saga" and image is not None)
             if mode == "saga":
                 t2i_options = saga_mod.parse_still_options(
                     aspect=aspect, character=character, outfit=outfit, quality=quality,
-                    layout=layout, background=background,
+                    layout=layout, background=background, photo=image is not None, strength=strength,
                 )
             else:
                 t2i_options = saga_mod.parse_motion_options(seconds=video_seconds, quality=quality)
@@ -906,7 +907,7 @@ async def _execute_generation(
             try:
                 if mode == "saga":
                     data, content_type, engine_meta = await saga_mod.run_still(
-                        client, prompt_en, seed=seed, options=opts
+                        client, prompt_en, seed=seed, options=opts, image_bytes=image_bytes
                     )
                 else:
                     assert image_bytes is not None
@@ -1062,9 +1063,14 @@ async def _execute_generation(
 async def _resume_persisted_job(job: dict) -> None:
     """Re-run a queued/running job after API worker restart using stored start image."""
     job_id = job["id"]
-    needs_image = (job.get("mode") or "img") not in ("t2i", "saga") or bool(
-        (job.get("options") or {}).get("background")
-    )
+    job_mode = job.get("mode") or "img"
+    job_opts = job.get("options") or {}
+    if job_mode == "t2i":
+        needs_image = bool(job_opts.get("background"))
+    elif job_mode == "saga":
+        needs_image = bool(job_opts.get("photo"))
+    else:
+        needs_image = True
     image_bytes = db.get_job_input_bytes_sync(job_id) if needs_image else None
     if needs_image and not image_bytes:
         image_bytes = await db.get_job_input_bytes(job_id)

@@ -29,6 +29,11 @@ const LAYOUTS = [
   ["scene", "Scene"],
   ["sprite", "Game sprite"],
 ];
+const STRENGTHS = [
+  ["light", "Light"],
+  ["medium", "Medium"],
+  ["strong", "Strong"],
+];
 const VIDEO_QUALITIES = [
   ["smooth", "Smooth"],
   ["hd", "720p (slow)"],
@@ -82,7 +87,12 @@ export default function SagaStudio() {
   const [quality, setQuality] = useState("hd");
   const [layout, setLayout] = useState("scene");
   const [background, setBackground] = useState("");
+  const [photo, setPhoto] = useState(null);
+  const [photoUrl, setPhotoUrl] = useState("");
+  const [strength, setStrength] = useState("medium");
   const pollRef = useRef(null);
+  const photoInput = useRef(null);
+  const sprite = layout === "sprite";
   const picked = characters.find((c) => c.id === character);
   const ideas = character ? CHAR_IDEAS : IDEAS;
 
@@ -155,13 +165,30 @@ export default function SagaStudio() {
     }
   }
 
+  useEffect(() => {
+    if (!photo) {
+      setPhotoUrl("");
+      return undefined;
+    }
+    const objectUrl = URL.createObjectURL(photo);
+    setPhotoUrl(objectUrl);
+    return () => URL.revokeObjectURL(objectUrl);
+  }, [photo]);
+
+  function onPickPhoto(e) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (file) setPhoto(file);
+  }
+
+  const canGenerate = Boolean(prompt.trim()) || (photo && !sprite);
+
   async function onGenerate(e) {
     e.preventDefault();
     const text = prompt.trim();
-    if (!text) return;
-    const sprite = layout === "sprite";
-    if (sprite && !background.trim()) {
-      setError("Game sprite mode needs a background — say where she stands.");
+    if (!canGenerate) return;
+    if (sprite && !background.trim() && !photo) {
+      setError("Game sprite mode needs a background — say where she stands, or add a background photo.");
       return;
     }
     const saga = {
@@ -170,10 +197,12 @@ export default function SagaStudio() {
       outfit: character ? outfit : undefined,
       quality,
       layout,
-      background: sprite ? background.trim() : undefined,
+      background: sprite && background.trim() ? background.trim() : undefined,
+      strength: photo ? strength : undefined,
     };
-    const label = picked ? `${picked.label}: ${text}` : text;
-    await enqueue({ mode: "saga", prompt: text, saga }, label);
+    const base = text || "Photo in Saga style";
+    const label = picked ? `${picked.label}: ${base}` : base;
+    await enqueue({ mode: "saga", prompt: text, saga, file: photo || undefined }, label);
   }
 
   async function onAnimate() {
@@ -268,7 +297,44 @@ export default function SagaStudio() {
 
             <div className="section">
               <div className="section-head">
-                <h2 className="section-title">{picked ? `What is ${picked.label} doing?` : "Describe the scene"}</h2>
+                <h2 className="section-title">Start from a photo (optional)</h2>
+              </div>
+              <input ref={photoInput} type="file" accept="image/*" hidden onChange={onPickPhoto} />
+              {photo ? (
+                <div className="saga-photo">
+                  <img className="saga-photo-preview" src={photoUrl} alt="" />
+                  <div className="saga-photo-side">
+                    <p className="setting-hint">
+                      {sprite
+                        ? "This photo becomes the game background she stands in."
+                        : "This photo gets redrawn in the Summertime Saga style."}
+                    </p>
+                    <Segment label="Strength" options={STRENGTHS} value={strength} onChange={setStrength} />
+                    <p className="setting-hint">
+                      Light keeps more of the photo · Strong looks more like the game. A short description below
+                      gives a much stronger game look.
+                    </p>
+                    <button type="button" className="ghost" onClick={() => setPhoto(null)}>
+                      remove photo
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <button type="button" className="ghost" onClick={() => photoInput.current?.click()}>
+                  Add photo
+                </button>
+              )}
+            </div>
+
+            <div className="section">
+              <div className="section-head">
+                <h2 className="section-title">
+                  {photo && !sprite
+                    ? "Describe the photo (optional)"
+                    : picked
+                      ? `What is ${picked.label} doing?`
+                      : "Describe the scene"}
+                </h2>
                 <span className="char-count">
                   {prompt.length}/{PROMPT_MAX}
                 </span>
@@ -278,9 +344,11 @@ export default function SagaStudio() {
                 rows={4}
                 maxLength={PROMPT_MAX}
                 placeholder={
-                  picked
-                    ? "e.g. standing in the kitchen holding a coffee mug, warm smile, morning light…"
-                    : "e.g. a 35 year old woman with short red hair in a green sweater, reading on a park bench in autumn, smiling at the viewer…"
+                  photo && !sprite
+                    ? "Optional but recommended: say what's in it, e.g. woman with long dark hair laughing, red turtleneck, city street…"
+                    : picked
+                      ? "e.g. standing in the kitchen holding a coffee mug, warm smile, morning light…"
+                      : "e.g. a 35 year old woman with short red hair in a green sweater, reading on a park bench in autumn, smiling at the viewer…"
                 }
                 value={prompt}
                 onChange={(e) => setPrompt(e.target.value.slice(0, PROMPT_MAX))}
@@ -294,9 +362,11 @@ export default function SagaStudio() {
               </div>
             </div>
 
-            {layout === "sprite" && (
+            {sprite && (
               <div className="section">
-                <h2 className="section-title">Background (where she stands)</h2>
+                <h2 className="section-title">
+                  {photo ? "Background notes (optional)" : "Background (where she stands)"}
+                </h2>
                 <input
                   className="saga-bg-input"
                   type="text"
@@ -316,13 +386,15 @@ export default function SagaStudio() {
             )}
 
             <div className="section">
-              <div className="setting-row">
-                <div className="setting-label">
-                  <span>Shape</span>
-                  <span className="setting-hint">Landscape matches the game screen</span>
+              {!photo && (
+                <div className="setting-row">
+                  <div className="setting-label">
+                    <span>Shape</span>
+                    <span className="setting-hint">Landscape matches the game screen</span>
+                  </div>
+                  <Segment label="Shape" options={ASPECTS} value={aspect} onChange={setAspect} />
                 </div>
-                <Segment label="Shape" options={ASPECTS} value={aspect} onChange={setAspect} />
-              </div>
+              )}
               <div className="setting-row">
                 <div className="setting-label">
                   <span>Quality</span>
@@ -339,9 +411,9 @@ export default function SagaStudio() {
               </div>
             </div>
 
-            <button type="submit" className="go" disabled={busy || !prompt.trim()}>
+            <button type="submit" className="go" disabled={busy || !canGenerate}>
               <span className="go-main">
-                <span>{busy ? "Queuing…" : "Generate image"}</span>
+                <span>{busy ? "Queuing…" : photo && !sprite ? "Restyle photo" : "Generate image"}</span>
                 {busy && <span className="spinner" />}
               </span>
               <span className="go-sub">

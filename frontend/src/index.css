@@ -2175,6 +2175,28 @@ button.gallery-item {
   margin: 0.5rem 0;
 }
 
+.saga-photo {
+  display: flex;
+  gap: 0.9rem;
+  align-items: flex-start;
+}
+
+.saga-photo-preview {
+  width: 120px;
+  max-height: 160px;
+  object-fit: cover;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+}
+
+.saga-photo-side {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
 .section .train-auto {
   margin-top: 0.6rem;
 }

@@ -61,6 +61,34 @@ class OptionTests(unittest.TestCase):
         opts = saga.parse_still_options(layout="sprite", background="suburban kitchen")
         self.assertEqual(opts["background"], "suburban kitchen")
 
+    def test_photo_options(self):
+        opts = saga.parse_still_options(photo=True)
+        self.assertEqual((opts["photo"], opts["strength"]), (True, "medium"))
+        self.assertNotIn("photo", saga.parse_still_options())
+        opts = saga.parse_still_options(photo=True, layout="sprite", strength="Strong")
+        self.assertEqual((opts["layout"], opts["background"], opts["strength"]), ("sprite", None, "strong"))
+        with self.assertRaises(saga.SagaError):
+            saga.parse_still_options(photo=True, strength="max")
+
+    def test_empty_prompt_only_with_photo(self):
+        self.assertEqual(saga.check_prompt("  ", allow_empty=True), "")
+        with self.assertRaises(saga.SagaError):
+            saga.check_prompt("")
+        with self.assertRaises(saga.SagaError):
+            saga.check_prompt("a schoolgirl", allow_empty=True)
+
+    def test_prepare_photo_snaps_to_16(self):
+        from io import BytesIO
+
+        from PIL import Image
+
+        buf = BytesIO()
+        Image.new("RGB", (1000, 1500), "red").save(buf, format="JPEG")
+        png, w, h = saga.prepare_photo(buf.getvalue())
+        self.assertEqual((w % 16, h % 16), (0, 0))
+        self.assertLessEqual(max(w, h), saga.PHOTO_BOX)
+        self.assertEqual(Image.open(BytesIO(png)).size, (w, h))
+
     def test_public_config_filters_installed(self):
         cfg = saga.public_config({saga.char_lora("debbie")})
         self.assertEqual([c["id"] for c in cfg["characters"]], ["debbie"])
@@ -97,6 +125,47 @@ class GraphTests(unittest.TestCase):
         self.assertEqual(g["17"]["inputs"]["model_name"], saga.FACE_DETECTOR)
         self.assertEqual(g["19"]["inputs"]["model_name"], saga.HAND_DETECTOR)
         self.assertEqual(g["10"]["inputs"]["images"], ["21", 0])
+
+    def test_photo_graph_encodes_source(self):
+        g = saga.build_still_graph("x", seed=1, width=896, height=1344, source_image="in.png", denoise=0.65)
+        self.assertEqual(g["50"]["inputs"]["image"], "in.png")
+        self.assertEqual(g["7"]["class_type"], "VAEEncode")
+        self.assertEqual(g["8"]["inputs"]["denoise"], 0.65)
+        plain = saga.build_still_graph("x", seed=1, width=896, height=1344, denoise=0.65)
+        self.assertEqual((plain["7"]["class_type"], plain["8"]["inputs"]["denoise"]), ("EmptyLatentImage", 1.0))
+
+    def test_run_still_photo_restyle(self):
+        from io import BytesIO
+
+        from PIL import Image
+
+        graphs, uploads = [], []
+
+        class _Client:
+            async def _upload_image(self, data):
+                uploads.append(data)
+                return "up.png"
+
+            async def _run_and_fetch(self, graph, prefer, input_name):
+                graphs.append((graph, input_name))
+                out = BytesIO()
+                Image.new("RGB", (64, 64)).save(out, format="PNG")
+                return out.getvalue(), "image/png"
+
+        src = BytesIO()
+        Image.new("RGB", (900, 1350)).save(src, format="JPEG")
+        _, _, meta = asyncio.run(saga.run_still(_Client(), "", seed=3, options={"strength": "strong"},
+                                                image_bytes=src.getvalue()))
+        graph, input_name = graphs[0]
+        self.assertEqual((len(uploads), input_name), (1, "up.png"))
+        self.assertEqual(graph["8"]["inputs"]["denoise"], saga.BLANK_STRENGTHS["strong"])
+        self.assertEqual(graph["5"]["inputs"]["text"], saga.STYLE_PREFIX)
+        self.assertEqual((meta["saga"]["kind"], meta["saga"]["strength"]), ("photo", "strong"))
+        self.assertEqual((meta["saga"]["aspect"], meta["saga"]["width"], meta["saga"]["height"]), ("photo", 1344, 2016))
+
+        asyncio.run(saga.run_still(_Client(), "woman laughing", seed=3, options={"strength": "strong"},
+                                   image_bytes=src.getvalue()))
+        self.assertEqual(graphs[1][0]["8"]["inputs"]["denoise"], saga.STRENGTHS["strong"])
 
     def test_cutout_graph(self):
         g = saga.build_still_graph("x", seed=1, width=768, height=1344, cutout=True)

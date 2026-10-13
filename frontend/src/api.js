@@ -405,6 +405,7 @@ export async function startJob({
       if (saga.quality) body.append("quality", saga.quality);
       if (saga.layout) body.append("layout", saga.layout);
       if (saga.background) body.append("background", saga.background);
+      if (saga.strength) body.append("strength", saga.strength);
     }
     if (engine) body.append("engine", engine);
     body.append("client_key", idem);

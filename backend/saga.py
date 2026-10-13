@@ -44,6 +44,11 @@ ASPECTS = {
 }
 QUALITIES = ("fast", "hd")
 LAYOUTS = ("scene", "sprite")
+# Photo restyle: how much of the uploaded photo gets redrawn (img2img denoise).
+STRENGTHS = {"light": 0.5, "medium": 0.65, "strong": 0.8}
+# Without a description the prompt can't pin down the content, so higher denoise invents new scenes.
+BLANK_STRENGTHS = {"light": 0.35, "medium": 0.4, "strong": 0.5}
+PHOTO_BOX = 1344
 VIDEO_SECONDS = (3, 5, 8, 10)
 VIDEO_FPS = 16
 VIDEO_QUALITIES = ("smooth", "hd")
@@ -55,7 +60,7 @@ SEGMENT_MAX_SECONDS = 5
 STYLE_PREFIX = f"masterpiece, best quality, score_7, {STYLE_TRIGGER}, adult, "
 NEGATIVE = (
     "worst quality, low quality, score_1, score_2, score_3, blurry, jpeg artifacts, sepia, "
-    "text, watermark, signature, child, loli, shota, underage, young child"
+    "text, watermark, signature, child, loli, shota, underage, young child, fangs, sharp teeth"
 )
 SPRITE_SUFFIX = ", solo, full body, standing, simple background, white background, no shadow"
 SPRITE_NEGATIVE = NEGATIVE + ", shadow, drop shadow, floor, ground, reflection"
@@ -123,10 +128,12 @@ class SagaError(ValueError):
     pass
 
 
-def check_prompt(prompt: str) -> str:
+def check_prompt(prompt: str, *, allow_empty: bool = False) -> str:
     """Saga only renders adults; reject anything that reads as a minor."""
     text = (prompt or "").strip()
     if not text:
+        if allow_empty:
+            return ""
         raise SagaError("Prompt is required")
     _check_adult(text)
     return text
@@ -182,17 +189,21 @@ def parse_still_options(
     quality: Optional[str] = None,
     layout: Optional[str] = None,
     background: Optional[str] = None,
+    photo: bool = False,
+    strength: Optional[str] = None,
 ) -> dict[str, Any]:
+    """photo=True: scene restyles the uploaded photo; sprite uses it as the background."""
     char = (character or "").strip().lower() or None
     if char and char not in CHARACTERS:
         raise SagaError(f"Unknown character '{character}'")
     lay = _pick(layout, LAYOUTS, "scene", "layout")
     bg = (background or "").strip() or None
     if lay == "sprite":
-        if not bg:
-            raise SagaError("Sprite mode needs a background (where she stands)")
-        _check_adult(bg)
-    return {
+        if not bg and not photo:
+            raise SagaError("Sprite mode needs a background (where she stands) or a background photo")
+        if bg:
+            _check_adult(bg)
+    opts = {
         "aspect": parse_aspect(aspect),
         "character": char,
         "outfit": _flag(outfit, True),
@@ -200,6 +211,26 @@ def parse_still_options(
         "layout": lay,
         "background": bg if lay == "sprite" else None,
     }
+    if photo:
+        opts["photo"] = True
+        opts["strength"] = _pick(strength, STRENGTHS, "medium", "strength")
+    return opts
+
+
+def prepare_photo(image_bytes: bytes, box: int = PHOTO_BOX) -> tuple[bytes, int, int]:
+    """RGB PNG fitted inside box x box, cropped to multiples of 16 for the latent."""
+    from PIL import Image, ImageOps
+
+    img = ImageOps.exif_transpose(Image.open(io.BytesIO(image_bytes))).convert("RGB")
+    scale = min(box / img.width, box / img.height)
+    w, h = max(16, round(img.width * scale)), max(16, round(img.height * scale))
+    img = img.resize((w, h), Image.Resampling.LANCZOS)
+    w16, h16 = w // 16 * 16, h // 16 * 16
+    left, top = (w - w16) // 2, (h - h16) // 2
+    img = img.crop((left, top, left + w16, top + h16))
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue(), w16, h16
 
 
 def parse_motion_options(*, seconds: Optional[Any] = None, quality: Optional[str] = None) -> dict[str, Any]:
@@ -233,7 +264,7 @@ def character_prompt(prompt: str, character: Optional[str], outfit: bool) -> str
         return prompt
     c = CHARACTERS[character]
     parts = [c["look"]] + ([c["outfit"]] if outfit else []) + [prompt]
-    return ", ".join(parts)
+    return ", ".join(p for p in parts if p)
 
 
 def _snap(v: float, m: int = 16) -> int:
@@ -251,8 +282,11 @@ def build_still_graph(
     negative: str = NEGATIVE,
     cutout: bool = False,
     detail: bool = True,
+    source_image: Optional[str] = None,
+    denoise: float = 1.0,
 ) -> dict[str, Any]:
-    """Anima still. Node "9" is the base decode; hd adds 11-19 (upscale, resample, face + hand detailers)."""
+    """Anima still. Node "9" is the base decode; hd adds 11-21 (upscale, resample, face + hand detailers).
+    source_image (an uploaded ComfyUI input) replaces the empty latent for img2img at the given denoise."""
     loras = [(STYLE_LORA, STYLE_STRENGTH_WITH_CHAR if character else STYLE_STRENGTH)]
     if character:
         loras.append((char_lora(character), CHAR_STRENGTH))
@@ -271,12 +305,16 @@ def build_still_graph(
     g.update({
         "5": {"class_type": "CLIPTextEncode", "inputs": {"text": STYLE_PREFIX + prompt, "clip": clip}},
         "6": {"class_type": "CLIPTextEncode", "inputs": {"text": negative, "clip": clip}},
-        "7": {"class_type": "EmptyLatentImage", "inputs": {"width": width, "height": height, "batch_size": 1}},
         "8": {"class_type": "KSampler", "inputs": {"model": model, "positive": ["5", 0], "negative": ["6", 0],
                                                    "latent_image": ["7", 0], "seed": seed, "steps": 30,
-                                                   "denoise": 1.0, **sampler}},
+                                                   "denoise": denoise if source_image else 1.0, **sampler}},
         "9": {"class_type": "VAEDecode", "inputs": {"samples": ["8", 0], "vae": ["3", 0]}},
     })
+    if source_image:
+        g["50"] = {"class_type": "LoadImage", "inputs": {"image": source_image}}
+        g["7"] = {"class_type": "VAEEncode", "inputs": {"pixels": ["50", 0], "vae": ["3", 0]}}
+    else:
+        g["7"] = {"class_type": "EmptyLatentImage", "inputs": {"width": width, "height": height, "batch_size": 1}}
     image = ["9", 0]
     if hd:
         g.update({
@@ -345,50 +383,65 @@ def compose_sprite(background: bytes, sprite: bytes, *, height_frac: float = 0.9
     return buf.getvalue()
 
 
+async def _render(client: Any, graph_for, photo: Optional[bytes]) -> bytes:
+    """Run one still graph; graph_for(source_name) builds it. Uploads (and scrubs) the photo when given."""
+    name = await client._upload_image(photo) if photo else None
+    data, _ = await client._run_and_fetch(graph_for(name), prefer=("images",), input_name=name)
+    return data
+
+
 async def run_still(
     client: Any, prompt: str, *, seed: Optional[int], aspect: Optional[str] = None,
-    options: Optional[dict[str, Any]] = None,
+    options: Optional[dict[str, Any]] = None, image_bytes: Optional[bytes] = None,
 ) -> tuple[bytes, str, dict]:
-    text = check_prompt(prompt)
+    """Text-to-image, or with image_bytes: restyle the photo (scene) / use it as the background (sprite)."""
+    text = check_prompt(prompt, allow_empty=image_bytes is not None)
     opts = dict(options or {})
     opts.setdefault("aspect", aspect)
     opts = parse_still_options(
         aspect=opts.get("aspect"), character=opts.get("character"),
         outfit=None if opts.get("outfit", True) else "0", quality=opts.get("quality"),
         layout=opts.get("layout"), background=opts.get("background"),
+        photo=image_bytes is not None, strength=opts.get("strength"),
     )
     seed = seed if seed is not None else random.randint(0, 2**32 - 1)
     hd = opts["quality"] == "hd"
     width, height = ASPECTS[opts["aspect"]]
-    subject = character_prompt(text, opts["character"], opts["outfit"])
+    photo = None
+    if image_bytes is not None:
+        photo, pw, ph = prepare_photo(image_bytes)
+    def denoise_for(described: bool) -> float:
+        return (STRENGTHS if described else BLANK_STRENGTHS)[opts["strength"]] if photo else 1.0
 
     if opts["layout"] == "sprite":
         sw, sh = ASPECTS["portrait"]
-        sprite, _ = await client._run_and_fetch(
-            build_still_graph(subject + SPRITE_SUFFIX, seed=seed, width=sw, height=sh,
-                              character=opts["character"], hd=hd, negative=SPRITE_NEGATIVE, cutout=True),
-            prefer=("images",), input_name=None,
-        )
-        back, _ = await client._run_and_fetch(
-            build_still_graph(BACKGROUND_PREFIX + opts["background"], seed=seed + 7, width=width, height=height,
-                              hd=hd, negative=BACKGROUND_NEGATIVE, detail=False),
-            prefer=("images",), input_name=None,
-        )
+        subject = character_prompt(text or "standing, smiling, looking at viewer", opts["character"], opts["outfit"])
+        sprite = await _render(client, lambda _n: build_still_graph(
+            subject + SPRITE_SUFFIX, seed=seed, width=sw, height=sh, character=opts["character"], hd=hd,
+            negative=SPRITE_NEGATIVE, cutout=True), None)
+        if photo:
+            width, height = pw, ph
+        back = await _render(client, lambda n: build_still_graph(
+            BACKGROUND_PREFIX + (opts["background"] or ""), seed=seed + 7, width=width, height=height,
+            hd=hd, negative=BACKGROUND_NEGATIVE, detail=False, source_image=n,
+            denoise=denoise_for(bool(opts["background"]))), photo)
         data, ctype = compose_sprite(back, sprite), "image/png"
     else:
-        data, ctype = await client._run_and_fetch(
-            build_still_graph(subject, seed=seed, width=width, height=height, character=opts["character"], hd=hd),
-            prefer=("images",), input_name=None,
-        )
+        if photo:
+            width, height = pw, ph
+        subject = character_prompt(text, opts["character"], opts["outfit"])
+        data = await _render(client, lambda n: build_still_graph(
+            subject, seed=seed, width=width, height=height, character=opts["character"], hd=hd,
+            source_image=n, denoise=denoise_for(bool(text))), photo)
+        ctype = "image/png"
     if hd:
         width, height = _snap(width * HD_SCALE), _snap(height * HD_SCALE)
     label = f"{ANIMA_UNET}+{STYLE_LORA}" + (f"+{char_lora(opts['character'])}" if opts["character"] else "")
-    return data, ctype, {
-        "model_label": label,
-        "seed_used": seed,
-        "saga": {"kind": "still", "aspect": opts["aspect"], "width": width, "height": height,
-                 "character": opts["character"], "quality": opts["quality"], "layout": opts["layout"]},
-    }
+    meta = {"kind": "still", "aspect": opts["aspect"], "width": width, "height": height,
+            "character": opts["character"], "quality": opts["quality"], "layout": opts["layout"]}
+    if photo:
+        meta.update(kind="photo", aspect="photo", strength=opts["strength"])
+    return data, ctype, {"model_label": label, "seed_used": seed, "saga": meta}
 
 
 def segment_plan(seconds: int) -> tuple[int, int]:

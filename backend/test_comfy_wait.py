@@ -12,7 +12,7 @@ from backend.config import Settings
 
 
 def _client() -> ComfyClient:
-    return ComfyClient(Settings(comfyui_url="http://comfy.test:8188"))
+    return ComfyClient(Settings(comfyui_url="http://comfy.test:8188", mongodb_uri="mongodb://localhost/test"))
 
 
 class WaitGraceTests(unittest.TestCase):
