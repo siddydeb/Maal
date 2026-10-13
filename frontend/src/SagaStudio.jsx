@@ -25,6 +25,7 @@ const QUALITIES = [
   ["hd", "HD"],
   ["fast", "Fast"],
 ];
+const LIBRARY_OPEN_KEY = "saga.libraryOpen";
 const LAYOUTS = [
   ["scene", "Scene"],
   ["sprite", "Game sprite"],
@@ -76,6 +77,14 @@ export default function SagaStudio() {
   const [jobs, setJobs] = useState([]);
   const [library, setLibrary] = useState([]);
   const [libraryTotal, setLibraryTotal] = useState(0);
+  const [libraryOpen, setLibraryOpen] = useState(() => localStorage.getItem(LIBRARY_OPEN_KEY) !== "0");
+
+  function toggleLibrary() {
+    setLibraryOpen((open) => {
+      localStorage.setItem(LIBRARY_OPEN_KEY, open ? "0" : "1");
+      return !open;
+    });
+  }
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [viewer, setViewer] = useState(null);
@@ -497,29 +506,41 @@ export default function SagaStudio() {
         </section>
 
         <section className="panel view-panel">
-          <h2 className="section-title">Library{libraryTotal ? ` (${libraryTotal})` : ""}</h2>
-          <ul className="gallery">
-            {!library.length && <li className="empty gallery-empty">Nothing here yet.</li>}
-            {library.map((item) => (
-              <li key={item.id} className="gallery-item">
-                <button type="button" className="gallery-cell" onClick={() => setViewer(item)}>
-                  {isVideo(item) ? (
-                    <span className="gallery-thumb gallery-thumb-video">
-                      <img src={thumbUrl(item)} alt="" loading="lazy" decoding="async" />
-                      <span className="gallery-play" aria-hidden="true">▶</span>
-                    </span>
-                  ) : (
-                    <img className="gallery-thumb" src={thumbUrl(item)} alt="" loading="lazy" decoding="async" />
-                  )}
-                  <span className="gallery-kind">{item.kind}</span>
+          <button
+            type="button"
+            className="saga-library-toggle"
+            aria-expanded={libraryOpen}
+            onClick={toggleLibrary}
+          >
+            <span className="section-title">Library{libraryTotal ? ` (${libraryTotal})` : ""}</span>
+            <span className="saga-library-toggle-hint">{libraryOpen ? "Hide ▴" : "Show ▾"}</span>
+          </button>
+          {libraryOpen && (
+            <>
+              <ul className="gallery">
+                {!library.length && <li className="empty gallery-empty">Nothing here yet.</li>}
+                {library.map((item) => (
+                  <li key={item.id} className="gallery-item">
+                    <button type="button" className="gallery-cell" onClick={() => setViewer(item)}>
+                      {isVideo(item) ? (
+                        <span className="gallery-thumb gallery-thumb-video">
+                          <img src={thumbUrl(item)} alt="" loading="lazy" decoding="async" />
+                          <span className="gallery-play" aria-hidden="true">▶</span>
+                        </span>
+                      ) : (
+                        <img className="gallery-thumb" src={thumbUrl(item)} alt="" loading="lazy" decoding="async" />
+                      )}
+                      <span className="gallery-kind">{item.kind}</span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+              {library.length < libraryTotal && (
+                <button type="button" className="ghost saga-more" onClick={loadMore}>
+                  Load more
                 </button>
-              </li>
-            ))}
-          </ul>
-          {library.length < libraryTotal && (
-            <button type="button" className="ghost saga-more" onClick={loadMore}>
-              Load more
-            </button>
+              )}
+            </>
           )}
         </section>
       </main>

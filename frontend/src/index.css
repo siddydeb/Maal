@@ -2175,6 +2175,35 @@ button.gallery-item {
   margin: 0.5rem 0;
 }
 
+.saga-library-toggle {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  padding: 0;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  cursor: pointer;
+  text-align: left;
+}
+
+.saga-library-toggle[aria-expanded="true"] {
+  margin-bottom: 0.75rem;
+}
+
+.saga-library-toggle-hint {
+  font-size: 0.8rem;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.saga-library-toggle:hover .saga-library-toggle-hint {
+  color: var(--ink);
+}
+
 .app-header-actions.saga-header-actions {
   display: flex;
 }
