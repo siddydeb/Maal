@@ -93,6 +93,42 @@ class UnlockLockoutTests(unittest.TestCase):
             self.assertIsNone(owners.owner_for_pin("9999"))
             self.assertIsNone(owners.owner_for_pin("1111:u1"))
 
+    def test_token_version_revokes_old_tokens(self):
+        from backend import owners
+
+        class _S:
+            wan_pins = f"{_hash('1111')}:usaga,{_hash('2222')}:u2"
+            wan_auth_secret = "test-secret-not-for-prod"
+            wan_token_versions = ""
+
+        settings = _S()
+        with patch.object(owners, "get_settings", return_value=settings):
+            old_saga, old_u2 = owners.make_token("usaga"), owners.make_token("u2")
+            settings.wan_token_versions = "usaga:2"
+            self.assertIsNone(owners.owner_from_token(old_saga))
+            self.assertEqual(owners.owner_from_token(old_u2), "u2")
+            self.assertEqual(owners.owner_from_token(owners.make_token("usaga")), "usaga")
+
+    def test_saga_script_key(self):
+        from backend import owners
+
+        key = "sk_saga_" + "x" * 40
+
+        class _S:
+            wan_pins = ""
+            wan_auth_secret = ""
+            wan_saga_owner = "usaga"
+            wan_saga_script_keys = f"abc, {owners.script_key_digest(key)}"
+
+        settings = _S()
+        with patch.object(owners, "get_settings", return_value=settings):
+            self.assertEqual(owners.owner_from_token(key), "usaga")
+            self.assertEqual(owners.owner_from_token(f"Bearer {key}"), "usaga")
+            self.assertIsNone(owners.owner_from_token(key + "y"))
+            self.assertIsNone(owners.owner_from_token("x" * 40))
+            settings.wan_saga_script_keys = "abc"
+            self.assertIsNone(owners.owner_from_token(key))
+
 
 if __name__ == "__main__":
     unittest.main()

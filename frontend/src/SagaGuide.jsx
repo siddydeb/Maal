@@ -99,14 +99,46 @@ export default function SagaGuide() {
           things you can see.
         </li>
         <li>
-          <b>Strength</b>: Light keeps shape and features closest; Medium redraws more and is needed for
-          changes (Light is raised to Medium automatically when you ask for changes); Strong for big changes
-          like a new hairstyle or outfit.
+          <b>Strength</b>: Subtle (0.3) keeps the expression and shapes; Light (0.5) redraws a bit more;
+          Medium (0.65) can change expressions; Strong (0.8) for big changes like a new hairstyle or outfit. For
+          photos, Light is raised to Medium when you ask for changes; parts keep what you pick.
         </li>
         <li>
           <b>Part type</b> (Part layout): pick Face, Hand, Body or Hair so a lone cut-out is not mistaken for
-          something else. Part mode zooms into the visible pixels, redraws them in full detail, and puts them
-          back at the same spot and size on your canvas.
+          something else. Part mode zooms into the visible pixels and redraws <b>only inside the part's own
+          outline</b>, in flat cel-shaded game colouring, then puts it back at the same spot, size and
+          transparency on your canvas.
+        </li>
+        <li>
+          <b>Variants</b>: renders 2 or 4 versions on seeds that follow each other. Results vary a lot by seed,
+          so pick the best one. Its seed is shown when you open it; reuse that seed for the character's other
+          expressions to keep her the same.
+        </li>
+      </ul>
+
+      <h3>Game layers (faces, talking faces, bodies)</h3>
+      <ul>
+        <li>
+          <b>Layers underneath</b>: add the body/hair layers beneath the part (same canvas size) so the model
+          sees her neck, hair and ears. Only the part itself is redrawn and returned.
+        </li>
+        <li>
+          <b>Talking face</b>: add the talking version of the face. It is rebuilt from the new face, redrawing
+          only the pixels where it differs (mostly the mouth) with the same seed, so the face does not flicker
+          when she speaks. Both come back in the library.
+        </li>
+        <li>
+          <b>Keep the original outlines</b>: copies the dark outline pixels back on top, keeping expression and
+          line weight exactly. Use it for "same face, new colours or freckles"; leave it off to change shapes.
+        </li>
+        <li>
+          <b>Match the skin colour</b>: shifts the skin back to the tones of the layers underneath (or the
+          original), so it doesn't drift darker or more saturated. Lips and outlines are left alone. Don't use
+          it when you want different skin.
+        </li>
+        <li>
+          Small faces (around 120 pixels) can't hold pores or iris detail; colours, freckle dots and line
+          shapes are what survive at game size.
         </li>
       </ul>
 

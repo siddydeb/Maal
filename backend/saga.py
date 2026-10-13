@@ -1,4 +1,4 @@
-"""Saga studio (PIN 1000): Summertime Saga style stills and animations.
+"""Saga studio: Summertime Saga style stills and animations.
 
 Fully separate from the Wan / Klein pipelines:
 - stills: Anima (Cosmos-Predict2 2B) + DarkCookie Summertime Saga LoRA, optional canon character LoRA,
@@ -11,10 +11,12 @@ from __future__ import annotations
 
 import copy
 import io
+import json
 import logging
 import random
 import re
-from typing import Any, Optional
+import zipfile
+from typing import Any, Callable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -48,10 +50,14 @@ ASPECTS = {
 QUALITIES = ("fast", "hd")
 LAYOUTS = ("scene", "sprite", "part")
 # Photo restyle: how much of the uploaded photo gets redrawn (img2img denoise).
-STRENGTHS = {"light": 0.5, "medium": 0.65, "strong": 0.8}
+STRENGTHS = {"subtle": 0.3, "light": 0.5, "medium": 0.65, "strong": 0.8}
 # Without a description the prompt can't pin down the content, so higher denoise invents new scenes.
-BLANK_STRENGTHS = {"light": 0.35, "medium": 0.4, "strong": 0.5}
+BLANK_STRENGTHS = {"subtle": 0.25, "light": 0.35, "medium": 0.4, "strong": 0.5}
+DENOISE_RANGE = (0.2, 0.8)
+MAX_VARIANTS = 4
 PHOTO_BOX = 1344
+# Game faces are ~120 px; a 1344 box blows them up 11x and the added texture turns to noise when shrunk back.
+PART_BOX = 1024
 VIDEO_SECONDS = (3, 5, 8, 10)
 VIDEO_FPS = 16
 VIDEO_QUALITIES = ("smooth", "hd")
@@ -80,6 +86,25 @@ PART_TYPES: dict[str, str] = {
 # Margin kept around a part's visible pixels when it is cropped out for redrawing.
 PART_MARGIN = 0.15
 CHANGES_MAX_CHARS = 500
+# The game's flat cartoon colouring; without these, small parts drift to painted skin and soft mouths.
+PART_STYLE = "flat color, cel shading, clean dark brown lineart, simple shading"
+PART_NEGATIVE = NEGATIVE + (
+    ", realistic, photorealistic, skin texture, pores, detailed iris, painterly, 3d, glossy lips"
+)
+# Repaint mask at render scale: grown past one latent cell (8 px) so the layer's soft edge is fully redrawn.
+MASK_GROW_PX = 17
+MASK_FEATHER_PX = 4
+# Talking face / animation frame: pixels differing from the main layer by more than this are redrawn.
+PAIR_DIFF = 24
+# keep_lines: original pixels at or below LINE_DARK luminance are copied back fully, fading out by LINE_LIGHT.
+LINE_DARK, LINE_LIGHT = 50, 95
+# match_skin: pixels within this distance of the dominant skin tone count as skin. Lightness is weighted
+# down (shading tones differ mostly in L) so lips, which differ in redness, are left alone.
+SKIN_RADIUS = 10.0
+SKIN_FADE = 4.0
+SKIN_L_WEIGHT = 0.4
+SKIN_MIN_PIXELS = 50
+BATCH_MAX_ITEMS = 400
 BACKGROUND_NEGATIVE = NEGATIVE + ", 1girl, 1boy, person, people, humans, character"
 HAND_PROMPT = "detailed hands, five fingers, well-drawn fingers"
 MOTION_PREFIX = "2D cartoon animation in the same art style, "
@@ -208,18 +233,45 @@ def parse_seconds(raw: Optional[Any]) -> int:
     return sec
 
 
-def _flag(raw: Optional[str], default: bool) -> bool:
-    text = (raw or "").strip().lower()
+def _flag(raw: Any, default: bool) -> bool:
+    if isinstance(raw, bool):
+        return raw
+    text = str(raw if raw is not None else "").strip().lower()
     if not text:
         return default
     return text not in ("0", "false", "off", "no")
+
+
+def parse_denoise(raw: Any) -> Optional[float]:
+    if raw in (None, ""):
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        raise SagaError("denoise must be a number") from None
+    lo, hi = DENOISE_RANGE
+    if not lo <= value <= hi:
+        raise SagaError(f"denoise must be between {lo} and {hi}")
+    return round(value, 3)
+
+
+def parse_count(raw: Any) -> int:
+    if raw in (None, ""):
+        return 1
+    try:
+        count = int(str(raw).strip())
+    except (TypeError, ValueError):
+        raise SagaError("count must be a whole number") from None
+    if not 1 <= count <= MAX_VARIANTS:
+        raise SagaError(f"count must be between 1 and {MAX_VARIANTS}")
+    return count
 
 
 def parse_still_options(
     *,
     aspect: Optional[str] = None,
     character: Optional[str] = None,
-    outfit: Optional[str] = None,
+    outfit: Any = None,
     quality: Optional[str] = None,
     layout: Optional[str] = None,
     background: Optional[str] = None,
@@ -227,16 +279,26 @@ def parse_still_options(
     strength: Optional[str] = None,
     part: Optional[str] = None,
     changes: Optional[str] = None,
-    rewrite: Optional[str] = None,
+    rewrite: Any = None,
+    count: Any = None,
+    denoise: Any = None,
+    keep_lines: Any = None,
+    match_skin: Any = None,
+    keep_size: Any = None,
+    context: bool = False,
+    pair: bool = False,
 ) -> dict[str, Any]:
     """photo=True: scene restyles the uploaded photo, sprite uses it as the background, part redraws one layer.
-    changes: plain-English edits to the uploaded image. rewrite: turn plain English into model tags (default on)."""
+    changes: plain-English edits to the uploaded image. rewrite: turn plain English into model tags (default on).
+    count: variants on seeds seed..seed+count-1. denoise: exact img2img amount, overrides strength.
+    Part only: context (layers beneath), pair (talking face redrawn from the main result), keep_lines,
+    match_skin. keep_size: scene/sprite photos come back at the photo's own size."""
     char = (character or "").strip().lower() or None
     if char and char not in CHARACTERS:
         raise SagaError(f"Unknown character '{character}'")
     lay = _pick(layout, LAYOUTS, "scene", "layout")
     if lay == "part" and not photo:
-        raise SagaError("Part mode needs the part image (face, hand, body…)")
+        raise SagaError("Part mode needs the part image (face, hand, bodyâ€¦)")
     bg = (background or "").strip() or None
     if lay == "sprite":
         if not bg and not photo:
@@ -252,15 +314,23 @@ def parse_still_options(
         "background": bg if lay == "sprite" else None,
     }
     opts["rewrite"] = _flag(rewrite, True)
+    opts["count"] = parse_count(count)
+    if (context or pair) and lay != "part":
+        raise SagaError("context and pair images only work in Part mode")
     if photo:
         opts["photo"] = True
         opts["strength"] = _pick(strength, STRENGTHS, "light" if lay == "part" else "medium", "strength")
+        opts["denoise"] = parse_denoise(denoise)
         edit = (changes or "").strip()[:CHANGES_MAX_CHARS] or None
         if edit:
             _check_adult(edit)
         opts["changes"] = edit
+        if lay != "part":
+            opts["keep_size"] = _flag(keep_size, False)
     if lay == "part":
         opts["part"] = _pick(part, PART_TYPES, "other", "part type")
+        opts["keep_lines"] = _flag(keep_lines, False)
+        opts["match_skin"] = _flag(match_skin, False)
     return opts
 
 
@@ -303,38 +373,66 @@ def _bleed(rgba: Any) -> Any:
     return Image.fromarray(np.clip(fill * 255.0 + 0.5, 0, 255).astype(np.uint8), "RGB")
 
 
-def prepare_part(image_bytes: bytes, box: int = PHOTO_BOX) -> tuple[bytes, int, int, dict[str, Any]]:
-    """A character part (face, hand…) scaled to fill box and padded (never cropped) to multiples of 16,
-    with transparent areas and padding filled by _bleed. The plan lets finish_part restore the exact
-    original canvas and transparency."""
+def open_layer(data: bytes) -> Any:
     from PIL import Image, ImageOps
 
-    full = ImageOps.exif_transpose(Image.open(io.BytesIO(image_bytes))).convert("RGBA")
-    alpha = full.getchannel("A")
-    region = (0, 0, full.width, full.height)
-    visible = alpha.point(lambda a: 255 if a > 8 else 0).getbbox()
-    if visible:
-        mx = round((visible[2] - visible[0]) * PART_MARGIN) + 4
-        my = round((visible[3] - visible[1]) * PART_MARGIN) + 4
-        region = (max(0, visible[0] - mx), max(0, visible[1] - my),
-                  min(full.width, visible[2] + mx), min(full.height, visible[3] + my))
-    rgba = full.crop(region)
-    scale = box / max(rgba.size)
-    w, h = max(1, round(rgba.width * scale)), max(1, round(rgba.height * scale))
+    return ImageOps.exif_transpose(Image.open(io.BytesIO(data))).convert("RGBA")
+
+
+def _png(img: Any) -> bytes:
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _visible(alpha: Any) -> Any:
+    return alpha.point(lambda a: 255 if a > 8 else 0)
+
+
+def part_region(layers: list[Any]) -> tuple[int, int, int, int]:
+    """Union of the layers' visible pixels plus a margin; the whole canvas when nothing is transparent."""
+    w, h = layers[0].size
+    boxes = [b for b in (_visible(im.getchannel("A")).getbbox() for im in layers) if b]
+    if not boxes:
+        return (0, 0, w, h)
+    x0, y0 = min(b[0] for b in boxes), min(b[1] for b in boxes)
+    x1, y1 = max(b[2] for b in boxes), max(b[3] for b in boxes)
+    mx, my = round((x1 - x0) * PART_MARGIN) + 4, round((y1 - y0) * PART_MARGIN) + 4
+    return (max(0, x0 - mx), max(0, y0 - my), min(w, x1 + mx), min(h, y1 + my))
+
+
+def prepare_part(
+    layer: Any, *, context: Any = None, repaint: Any = None,
+    region: Optional[tuple[int, int, int, int]] = None, box: int = PART_BOX,
+) -> tuple[bytes, int, int, dict[str, Any]]:
+    """Crop the part's region from the layer laid over its context, scale it to fill box and pad (never crop)
+    to multiples of 16; empty areas are filled by _bleed. Returns one PNG with the picture on the left and
+    the repaint mask (white = redraw; the layer's own pixels unless repaint is given) on the right.
+    The plan lets finish_part put the result back on the original canvas."""
+    from PIL import Image, ImageFilter
+
+    region = region or part_region([layer])
+    picture = Image.alpha_composite(context, layer) if context is not None else layer
+    repaint = repaint if repaint is not None else _visible(layer.getchannel("A"))
+    crop, mask_crop = picture.crop(region), repaint.crop(region)
+    scale = box / max(crop.size)
+    w, h = max(1, round(crop.width * scale)), max(1, round(crop.height * scale))
     w16, h16 = max(16, -(-w // 16) * 16), max(16, -(-h // 16) * 16)
     left, top = (w16 - w) // 2, (h16 - h) // 2
     canvas = Image.new("RGBA", (w16, h16), (0, 0, 0, 0))
-    canvas.paste(rgba.resize((w, h), Image.Resampling.LANCZOS), (left, top))
-    buf = io.BytesIO()
-    _bleed(canvas).save(buf, format="PNG")
-    plan = {"size": full.size, "region": region, "canvas": (w16, h16), "inner": (left, top, w, h),
-            "alpha": alpha if alpha.getextrema()[0] < 255 else None}
-    return buf.getvalue(), w16, h16, plan
+    canvas.paste(crop.resize((w, h), Image.Resampling.LANCZOS), (left, top))
+    mask = Image.new("L", (w16, h16), 0)
+    mask.paste(mask_crop.resize((w, h), Image.Resampling.BILINEAR), (left, top))
+    mask = mask.filter(ImageFilter.MaxFilter(MASK_GROW_PX)).filter(ImageFilter.GaussianBlur(MASK_FEATHER_PX))
+    sheet = Image.new("RGB", (w16 * 2, h16))
+    sheet.paste(_bleed(canvas), (0, 0))
+    sheet.paste(mask.convert("RGB"), (w16, 0))
+    plan = {"size": layer.size, "region": region, "canvas": (w16, h16), "inner": (left, top, w, h)}
+    return _png(sheet), w16, h16, plan
 
 
-def finish_part(data: bytes, plan: dict[str, Any]) -> bytes:
-    """Undo prepare_part: drop the padding, shrink back into the cropped region of the original canvas,
-    re-apply the original alpha."""
+def finish_part(data: bytes, plan: dict[str, Any]) -> Any:
+    """Undo prepare_part: drop the padding and shrink back into the region of an RGB canvas the original size."""
     from PIL import Image
 
     out = Image.open(io.BytesIO(data)).convert("RGB")
@@ -343,15 +441,193 @@ def finish_part(data: bytes, plan: dict[str, Any]) -> bytes:
     out = out.crop((round(left * sx), round(top * sy), round((left + w) * sx), round((top + h) * sy)))
     x0, y0, x1, y1 = plan["region"]
     out = out.resize((x1 - x0, y1 - y0), Image.Resampling.LANCZOS)
-    if (x0, y0, x1, y1) != (0, 0, *plan["size"]):
-        canvas = Image.new("RGB", plan["size"], (0, 0, 0))
-        canvas.paste(out, (x0, y0))
-        out = canvas
-    if plan["alpha"] is not None:
-        out.putalpha(plan["alpha"])
+    canvas = Image.new("RGB", plan["size"], (0, 0, 0))
+    canvas.paste(out, (x0, y0))
+    return canvas
+
+
+def with_alpha(rgb: Any, original: Any) -> Any:
+    """Cut a result to the original layer's transparency (opaque layers stay RGB)."""
+    alpha = original.getchannel("A")
+    if alpha.getextrema()[0] == 255:
+        return rgb
+    out = rgb.copy()
+    out.putalpha(alpha)
+    return out
+
+
+def diff_mask(a: Any, b: Any) -> Any:
+    """White where two same-size layers differ (premultiplied colour or alpha), grown by 2 px."""
+    import numpy as np
+    from PIL import Image, ImageFilter
+
+    x, y = np.asarray(a, dtype=np.float32), np.asarray(b, dtype=np.float32)
+    px, py = x[..., :3] * x[..., 3:] / 255.0, y[..., :3] * y[..., 3:] / 255.0
+    d = np.maximum(np.abs(px - py).max(axis=-1), np.abs(x[..., 3] - y[..., 3]))
+    mask = Image.fromarray(((d > PAIR_DIFF) * 255).astype(np.uint8), "L")
+    return mask.filter(ImageFilter.MaxFilter(5))
+
+
+def keep_lines(result: Any, original: Any) -> Any:
+    """Copy the original's dark outline pixels back over the result (keeps expression and line weight)."""
+    import numpy as np
+    from PIL import Image
+
+    o = np.asarray(original, dtype=np.float32)
+    r = np.asarray(result.convert("RGB"), dtype=np.float32)
+    lum = o[..., :3] @ np.array([0.299, 0.587, 0.114], dtype=np.float32)
+    w = np.clip((LINE_LIGHT - lum) / (LINE_LIGHT - LINE_DARK), 0.0, 1.0) * (o[..., 3] / 255.0)
+    out = r * (1.0 - w[..., None]) + o[..., :3] * w[..., None]
+    return Image.fromarray(np.clip(out + 0.5, 0, 255).astype(np.uint8), "RGB")
+
+
+def _lab(rgb: Any) -> Any:
+    import cv2
+    import numpy as np
+
+    return cv2.cvtColor(np.asarray(rgb.convert("RGB"), dtype=np.float32) / 255.0, cv2.COLOR_RGB2LAB)
+
+
+def _skin_dist(lab: Any, median: Any) -> Any:
+    import numpy as np
+
+    d = lab - median
+    return np.sqrt((d[..., 0] * SKIN_L_WEIGHT) ** 2 + d[..., 1] ** 2 + d[..., 2] ** 2)
+
+
+def _skin_tone(lab: Any, rgb: Any, alpha: Any) -> Optional[tuple[Any, Any, Any]]:
+    """(median, mean, std) Lab of the dominant skin tone among opaque pixels, or None if too few."""
+    import cv2
+    import numpy as np
+
+    hsv = cv2.cvtColor(np.asarray(rgb.convert("RGB"), dtype=np.uint8), cv2.COLOR_RGB2HSV_FULL).astype(np.float32)
+    hue, sat, val = hsv[..., 0] * 360.0 / 255.0, hsv[..., 1] / 255.0, hsv[..., 2] / 255.0
+    cand = ((hue <= 50) | (hue >= 340)) & (sat >= 0.12) & (sat <= 0.8) & (val >= 0.3)
+    cand &= np.asarray(alpha) > 200
+    if cand.sum() < SKIN_MIN_PIXELS:
+        return None
+    med = np.median(lab[cand], axis=0)
+    sel = cand & (_skin_dist(lab, med) < SKIN_RADIUS)
+    if sel.sum() < SKIN_MIN_PIXELS:
+        return None
+    return med, lab[sel].mean(axis=0), lab[sel].std(axis=0) + 1e-3
+
+
+def skin_params(result: Any, layer: Any, reference: Any) -> Optional[dict[str, Any]]:
+    """How to move the result's skin tones onto the reference's (context, or the original layer)."""
+    res = _skin_tone(_lab(result), result, layer.getchannel("A"))
+    ref = _skin_tone(_lab(reference), reference, reference.getchannel("A"))
+    if ref is None and reference is not layer:
+        ref = _skin_tone(_lab(layer), layer, layer.getchannel("A"))
+    if res is None or ref is None:
+        return None
+    return {"median": res[0], "mean": res[1], "std": res[2], "ref_mean": ref[1], "ref_std": ref[2]}
+
+
+def match_skin(result: Any, alpha: Any, params: Optional[dict[str, Any]]) -> Any:
+    """Shift skin-like result pixels so their Lab mean/spread match the reference skin; other colours stay."""
+    import cv2
+    import numpy as np
+    from PIL import Image
+
+    if not params:
+        return result
+    lab = _lab(result)
+    dist = _skin_dist(lab, params["median"])
+    weight = np.clip((SKIN_RADIUS + SKIN_FADE - dist) / (2 * SKIN_FADE), 0.0, 1.0) * (np.asarray(alpha) > 0)
+    scale = np.clip(params["ref_std"] / params["std"], 0.7, 1.4)
+    moved = (lab - params["mean"]) * scale + params["ref_mean"]
+    lab = lab + (moved - lab) * weight[..., None]
+    rgb = cv2.cvtColor(lab.astype(np.float32), cv2.COLOR_LAB2RGB)
+    return Image.fromarray(np.clip(rgb * 255.0 + 0.5, 0, 255).astype(np.uint8), "RGB")
+
+
+def pack_inputs(files: dict[str, bytes], manifest: Optional[dict[str, Any]] = None) -> bytes:
+    """Several job inputs (layer, context, pair, or a whole batch) stored as one zip."""
     buf = io.BytesIO()
-    out.save(buf, format="PNG")
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as zf:
+        if manifest is not None:
+            zf.writestr("manifest.json", json.dumps(manifest))
+        for name, data in files.items():
+            zf.writestr(f"files/{name}", data)
     return buf.getvalue()
+
+
+def is_bundle(data: Optional[bytes]) -> bool:
+    return bool(data) and data[:4] == b"PK\x03\x04"
+
+
+def unpack_inputs(data: bytes) -> tuple[dict[str, bytes], Optional[dict[str, Any]]]:
+    """Inverse of pack_inputs; a plain image comes back as {"image": data}."""
+    if not is_bundle(data):
+        return {"image": data}, None
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        names = zf.namelist()
+        manifest = json.loads(zf.read("manifest.json")) if "manifest.json" in names else None
+        files = {n[len("files/"):]: zf.read(n) for n in names if n.startswith("files/")}
+    return files, manifest
+
+
+def bundle_preview(data: bytes) -> bytes:
+    """The main image of a job input (for queue thumbnails)."""
+    files, manifest = unpack_inputs(data)
+    if manifest and manifest.get("items"):
+        return files[manifest["items"][0]["image"]]
+    return files.get("image") or next(iter(files.values()))
+
+
+def safe_name(raw: str) -> str:
+    """Upload file name -> safe relative path inside the result zip."""
+    name = (raw or "").replace("\\", "/").strip().lstrip("/")
+    parts = [p for p in name.split("/") if p not in ("", ".")]
+    if not parts or ".." in parts:
+        raise SagaError(f"Bad file name '{raw}'")
+    return "/".join(parts)
+
+
+def _as_list(raw: Any) -> list[str]:
+    if raw in (None, ""):
+        return []
+    return [raw] if isinstance(raw, str) else list(raw)
+
+
+def check_batch(files: dict[str, bytes], manifest: Any) -> dict[str, Any]:
+    """Validate a batch manifest against the uploaded files: names exist, images open, sizes match per item.
+    Item: {"image": name, "context"?: name, "pair"?: name or [names], "part"?: type}."""
+    from PIL import Image
+
+    items = manifest.get("items") if isinstance(manifest, dict) else None
+    if not isinstance(items, list) or not items:
+        raise SagaError("manifest needs a non-empty 'items' list")
+    if len(items) > BATCH_MAX_ITEMS:
+        raise SagaError(f"At most {BATCH_MAX_ITEMS} items per batch")
+    sizes: dict[str, tuple[int, int]] = {}
+
+    def size_of(name: str) -> tuple[int, int]:
+        if name not in files:
+            raise SagaError(f"'{name}' is in the manifest but was not uploaded")
+        if name not in sizes:
+            try:
+                sizes[name] = Image.open(io.BytesIO(files[name])).size
+            except Exception:
+                raise SagaError(f"'{name}' is not an image") from None
+        return sizes[name]
+
+    clean = []
+    for i, item in enumerate(items):
+        if not isinstance(item, dict) or not item.get("image"):
+            raise SagaError(f"Item {i + 1} needs an 'image'")
+        entry = {"image": safe_name(item["image"]), "pair": [safe_name(p) for p in _as_list(item.get("pair"))]}
+        if item.get("context"):
+            entry["context"] = safe_name(item["context"])
+        if item.get("part"):
+            entry["part"] = _pick(item["part"], PART_TYPES, "other", "part type")
+        size = size_of(entry["image"])
+        for other in entry["pair"] + ([entry["context"]] if "context" in entry else []):
+            if size_of(other) != size:
+                raise SagaError(f"'{other}' is {size_of(other)}, but '{entry['image']}' is {size}; they must match")
+        clean.append(entry)
+    return {"items": clean}
 
 
 def parse_motion_options(*, seconds: Optional[Any] = None, quality: Optional[str] = None) -> dict[str, Any]:
@@ -375,6 +651,9 @@ def public_config(installed: Optional[set[str]]) -> dict[str, Any]:
         "qualities": list(QUALITIES),
         "layouts": list(LAYOUTS),
         "part_types": list(PART_TYPES),
+        "strengths": STRENGTHS,
+        "denoise_range": list(DENOISE_RANGE),
+        "max_variants": MAX_VARIANTS,
         "video_seconds": list(VIDEO_SECONDS),
         "video_qualities": list(VIDEO_QUALITIES),
         "hd_video_max_seconds": HD_VIDEO_MAX_SECONDS,
@@ -450,9 +729,12 @@ def build_still_graph(
     detail: bool = True,
     source_image: Optional[str] = None,
     denoise: float = 1.0,
+    masked: bool = False,
 ) -> dict[str, Any]:
     """Anima still. Node "9" is the base decode; hd adds 11-21 (upscale, resample, face + hand detailers).
-    source_image (an uploaded ComfyUI input) replaces the empty latent for img2img at the given denoise."""
+    source_image (an uploaded ComfyUI input) replaces the empty latent for img2img at the given denoise.
+    masked: source_image is prepare_part's sheet (picture | mask, each width x height) and only the
+    mask is redrawn, in the base and the HD pass."""
     loras = [(STYLE_LORA, STYLE_STRENGTH_WITH_CHAR if character else STYLE_STRENGTH)]
     if character:
         loras.append((char_lora(character), CHAR_STRENGTH))
@@ -476,7 +758,18 @@ def build_still_graph(
                                                    "denoise": denoise if source_image else 1.0, **sampler}},
         "9": {"class_type": "VAEDecode", "inputs": {"samples": ["8", 0], "vae": ["3", 0]}},
     })
-    if source_image:
+    masked = masked and bool(source_image)
+    if masked:
+        crop = {"width": width, "height": height, "y": 0}
+        g.update({
+            "50": {"class_type": "LoadImage", "inputs": {"image": source_image}},
+            "51": {"class_type": "ImageCrop", "inputs": {"image": ["50", 0], "x": 0, **crop}},
+            "52": {"class_type": "ImageCrop", "inputs": {"image": ["50", 0], "x": width, **crop}},
+            "53": {"class_type": "ImageToMask", "inputs": {"image": ["52", 0], "channel": "red"}},
+            "54": {"class_type": "VAEEncode", "inputs": {"pixels": ["51", 0], "vae": ["3", 0]}},
+            "7": {"class_type": "SetLatentNoiseMask", "inputs": {"samples": ["54", 0], "mask": ["53", 0]}},
+        })
+    elif source_image:
         g["50"] = {"class_type": "LoadImage", "inputs": {"image": source_image}}
         g["7"] = {"class_type": "VAEEncode", "inputs": {"pixels": ["50", 0], "vae": ["3", 0]}}
     else:
@@ -495,6 +788,9 @@ def build_still_graph(
                                                         "denoise": HIRES_DENOISE, **sampler}},
             "16": {"class_type": "VAEDecode", "inputs": {"samples": ["15", 0], "vae": ["3", 0]}},
         })
+        if masked:
+            g["55"] = {"class_type": "SetLatentNoiseMask", "inputs": {"samples": ["14", 0], "mask": ["53", 0]}}
+            g["15"]["inputs"]["latent_image"] = ["55", 0]
         image = ["16", 0]
         if detail:
             g["17"] = {"class_type": "UltralyticsDetectorProvider", "inputs": {"model_name": FACE_DETECTOR}}
@@ -556,93 +852,260 @@ async def _render(client: Any, graph_for, photo: Optional[bytes]) -> bytes:
     return data
 
 
-async def run_still(
-    client: Any, prompt: str, *, seed: Optional[int], aspect: Optional[str] = None,
-    options: Optional[dict[str, Any]] = None, image_bytes: Optional[bytes] = None,
-) -> tuple[bytes, str, dict]:
-    """Text-to-image, or with image_bytes: restyle the photo (scene), use it as the background (sprite)
-    or redraw one character layer (part). Plain English is rewritten into model tags unless rewrite is off."""
-    text = check_prompt(prompt, allow_empty=image_bytes is not None)
-    opts = dict(options or {})
-    opts.setdefault("aspect", aspect)
+def _join(*parts: str) -> str:
+    return ", ".join(p for p in parts if p)
+
+
+def _label(character: Optional[str]) -> str:
+    return f"{ANIMA_UNET}+{STYLE_LORA}" + (f"+{char_lora(character)}" if character else "")
+
+
+def new_seed() -> int:
+    return random.randint(0, 2**32 - MAX_VARIANTS - 1)
+
+
+async def _still_setup(
+    client: Any, prompt: str, options: dict[str, Any], *, photo: bool, context: bool = False, pair: bool = False,
+) -> tuple[dict[str, Any], dict[str, str]]:
+    """Validate the options and rewrite the words once (shared by variants and batch items)."""
+    text = check_prompt(prompt, allow_empty=photo)
+    raw = dict(options)
     opts = parse_still_options(
-        aspect=opts.get("aspect"), character=opts.get("character"),
-        outfit=None if opts.get("outfit", True) else "0", quality=opts.get("quality"),
-        layout=opts.get("layout"), background=opts.get("background"),
-        photo=image_bytes is not None, strength=opts.get("strength"), part=opts.get("part"),
-        changes=opts.get("changes"), rewrite=None if opts.get("rewrite", True) else "0",
+        aspect=raw.get("aspect"), character=raw.get("character"), outfit=raw.get("outfit"),
+        quality=raw.get("quality"), layout=raw.get("layout"), background=raw.get("background"),
+        photo=photo, strength=raw.get("strength"), part=raw.get("part"), changes=raw.get("changes"),
+        rewrite=raw.get("rewrite"), count=raw.get("count"), denoise=raw.get("denoise"),
+        keep_lines=raw.get("keep_lines"), match_skin=raw.get("match_skin"), keep_size=raw.get("keep_size"),
+        context=context, pair=pair,
     )
-    seed = seed if seed is not None else random.randint(0, 2**32 - 1)
-    hd = opts["quality"] == "hd"
-    width, height = ASPECTS[opts["aspect"]]
-    photo, plan = None, None
-    if opts["layout"] == "part":
-        photo, pw, ph, plan = prepare_part(image_bytes)
-    elif image_bytes is not None:
-        photo, pw, ph = prepare_photo(image_bytes)
 
     async def adapt(words: Optional[str]) -> str:
         return await rewrite_prompt(client, words or "") if opts["rewrite"] else (words or "")
 
-    desc = await adapt(text)
-    edit = await adapt(opts.get("changes")) if photo else ""
-    strength = opts.get("strength")
-    if edit and strength == "light":
-        strength = "medium"
+    words = {"desc": await adapt(text), "edit": await adapt(opts.get("changes")) if photo else ""}
+    if opts["layout"] == "sprite":
+        words["background"] = await adapt(opts["background"])
+    return opts, words
 
-    def denoise_for(described: bool) -> float:
-        return (STRENGTHS if described else BLANK_STRENGTHS)[strength] if photo else 1.0
 
-    def join(*parts: str) -> str:
-        return ", ".join(p for p in parts if p)
+def _denoise(opts: dict[str, Any], described: bool) -> float:
+    if not opts.get("photo"):
+        return 1.0
+    if opts.get("denoise") is not None:
+        return opts["denoise"]
+    return (STRENGTHS if described else BLANK_STRENGTHS)[opts["strength"]]
 
-    if plan:
-        part_tags = PART_TYPES[opts["part"]]
-        subject = join(part_tags, character_prompt(desc, opts["character"], opts["outfit"]), edit, PART_SUFFIX)
-        out = await _render(client, lambda n: build_still_graph(
-            subject, seed=seed, width=pw, height=ph, character=opts["character"], hd=hd,
-            source_image=n, denoise=denoise_for(bool(part_tags or desc or edit))), photo)
-        data, ctype = finish_part(out, plan), "image/png"
-    elif opts["layout"] == "sprite":
-        sw, sh = ASPECTS["portrait"]
-        subject = character_prompt(desc or "standing, smiling, looking at viewer", opts["character"], opts["outfit"])
-        background = await adapt(opts["background"])
-        sprite = await _render(client, lambda _n: build_still_graph(
-            subject + SPRITE_SUFFIX, seed=seed, width=sw, height=sh, character=opts["character"], hd=hd,
-            negative=SPRITE_NEGATIVE, cutout=True), None)
+
+def part_subject(opts: dict[str, Any], words: dict[str, str]) -> str:
+    return _join(PART_TYPES[opts["part"]], character_prompt(words["desc"], opts["character"], opts["outfit"]),
+                 words["edit"], PART_STYLE, PART_SUFFIX)
+
+
+def _part_denoise(opts: dict[str, Any], words: dict[str, str]) -> float:
+    return _denoise(opts, bool(PART_TYPES[opts["part"]] or words["desc"] or words["edit"]))
+
+
+async def _render_part(
+    client: Any, layer: Any, *, context: Any, repaint: Any, region: tuple[int, int, int, int],
+    subject: str, seed: int, denoise: float, opts: dict[str, Any],
+) -> Any:
+    sheet, w, h, plan = prepare_part(layer, context=context, repaint=repaint, region=region)
+    out = await _render(client, lambda n: build_still_graph(
+        subject, seed=seed, width=w, height=h, character=opts["character"], hd=opts["quality"] == "hd",
+        negative=PART_NEGATIVE, detail=False, source_image=n, denoise=denoise, masked=True), sheet)
+    return finish_part(out, plan)
+
+
+async def render_part_set(
+    client: Any, layer: Any, followers: list[Any], *, context: Any, subject: str, seed: int,
+    denoise: float, opts: dict[str, Any],
+) -> list[Any]:
+    """Redraw the layer inside its own outline, then rebuild each follower (talking face, animation frame)
+    from that result, redrawing only where its original differs from the layer's original with the same
+    seed and prompt, so swapping between them never flickers. Each comes back cut to its own transparency."""
+    from PIL import Image, ImageFilter
+
+    region = part_region([layer, *followers])
+    kw = {"context": context, "region": region, "subject": subject, "seed": seed, "denoise": denoise, "opts": opts}
+    gen = await _render_part(client, layer, repaint=None, **kw)
+    skin = skin_params(gen, layer, context if context is not None else layer) if opts.get("match_skin") else None
+
+    def post(img: Any, original: Any) -> Any:
+        img = match_skin(img, original.getchannel("A"), skin)
+        return keep_lines(img, original) if opts.get("keep_lines") else img
+
+    main = post(gen, layer)
+    out = [with_alpha(main, layer)]
+    for frame in followers:
+        changed = diff_mask(layer, frame)
+        if changed.getbbox() is None:
+            out.append(with_alpha(main, frame))
+            continue
+        src = Image.composite(frame.convert("RGB"), main, changed)
+        src.putalpha(frame.getchannel("A"))
+        redrawn = post(await _render_part(client, src, repaint=changed, **kw), frame)
+        blend = changed.filter(ImageFilter.GaussianBlur(1.5))
+        out.append(with_alpha(Image.composite(redrawn, main, blend), frame))
+    return out
+
+
+async def run_still_outputs(
+    client: Any, prompt: str, *, seed: Optional[int], aspect: Optional[str] = None,
+    options: Optional[dict[str, Any]] = None, inputs: Optional[dict[str, bytes]] = None,
+) -> list[tuple[bytes, str, dict]]:
+    """Text-to-image, or with inputs["image"]: restyle the photo (scene), use it as the background (sprite)
+    or redraw one character layer (part; inputs may add "context" and "pair"). One output per variant
+    (count, seeds seed..seed+count-1), each followed by its talking face when a pair is given.
+    Plain English is rewritten into model tags unless rewrite is off."""
+    from PIL import Image
+
+    inputs = {k: v for k, v in (inputs or {}).items() if v}
+    image_bytes = inputs.get("image")
+    options = dict(options or {})
+    if options.get("aspect") is None:
+        options["aspect"] = aspect
+    opts, words = await _still_setup(client, prompt, options, photo=image_bytes is not None,
+                                     context="context" in inputs, pair="pair" in inputs)
+    seed = seed if seed is not None else new_seed()
+    label, count = _label(opts["character"]), opts["count"]
+    base = {"character": opts["character"], "quality": opts["quality"], "layout": opts["layout"]}
+    outputs: list[tuple[bytes, str, dict]] = []
+
+    if opts["layout"] == "part":
+        layer = open_layer(image_bytes)
+        context = open_layer(inputs["context"]) if "context" in inputs else None
+        followers = [open_layer(inputs["pair"])] if "pair" in inputs else []
+        for other, what in [(context, "context"), *((f, "pair") for f in followers)]:
+            if other is not None and other.size != layer.size:
+                raise SagaError(f"The {what} image is {other.width}x{other.height} but the layer is "
+                                f"{layer.width}x{layer.height}; they must be the same size")
+        subject, denoise = part_subject(opts, words), _part_denoise(opts, words)
+        for i in range(count):
+            images = await render_part_set(client, layer, followers, context=context, subject=subject,
+                                           seed=seed + i, denoise=denoise, opts=opts)
+            for role, img in zip(("main", "pair"), images):
+                meta = {**base, "kind": "part", "aspect": "photo", "width": img.width, "height": img.height,
+                        "prompt_used": subject, "strength": opts["strength"], "denoise": denoise,
+                        "changes": opts.get("changes"), "part": opts["part"], "transparent": img.mode == "RGBA",
+                        "context": context is not None, "keep_lines": opts["keep_lines"],
+                        "match_skin": opts["match_skin"], "role": role, "variant": i + 1, "variants": count}
+                outputs.append((_png(img), "image/png", {"model_label": label, "seed_used": seed + i, "saga": meta}))
+        return outputs
+
+    photo, width, height = (prepare_photo(image_bytes) if image_bytes is not None
+                            else (None, *ASPECTS[opts["aspect"]]))
+    keep = open_layer(image_bytes).size if photo and opts.get("keep_size") else None
+    if words["edit"] and opts["layout"] == "scene" and opts.get("strength") == "light":
+        opts["strength"] = "medium"
+    hd = opts["quality"] == "hd"
+    for i in range(count):
+        s = seed + i
+        if opts["layout"] == "sprite":
+            sw, sh = ASPECTS["portrait"]
+            subject = character_prompt(words["desc"] or "standing, smiling, looking at viewer",
+                                       opts["character"], opts["outfit"])
+            background = words["background"]
+            denoise = _denoise(opts, bool(background))
+            sprite = await _render(client, lambda _n: build_still_graph(
+                subject + SPRITE_SUFFIX, seed=s, width=sw, height=sh, character=opts["character"], hd=hd,
+                negative=SPRITE_NEGATIVE, cutout=True), None)
+            back = await _render(client, lambda n: build_still_graph(
+                BACKGROUND_PREFIX + background, seed=s + 7, width=width, height=height,
+                hd=hd, negative=BACKGROUND_NEGATIVE, detail=False, source_image=n, denoise=denoise), photo)
+            data = compose_sprite(back, sprite)
+            subject = _join(subject, f"background: {background}" if background else "")
+        else:
+            subject = character_prompt(_join(words["desc"], words["edit"]), opts["character"], opts["outfit"])
+            denoise = _denoise(opts, bool(words["desc"] or words["edit"]))
+            data = await _render(client, lambda n: build_still_graph(
+                subject, seed=s, width=width, height=height, character=opts["character"], hd=hd,
+                source_image=n, denoise=denoise), photo)
+        out_w, out_h = (_snap(width * HD_SCALE), _snap(height * HD_SCALE)) if hd else (width, height)
+        if keep:
+            img = Image.open(io.BytesIO(data)).convert("RGB")
+            data, (out_w, out_h) = _png(img.resize(keep, Image.Resampling.LANCZOS)), keep
+        meta = {**base, "kind": "still", "aspect": opts["aspect"], "width": out_w, "height": out_h,
+                "prompt_used": subject}
         if photo:
-            width, height = pw, ph
-        back = await _render(client, lambda n: build_still_graph(
-            BACKGROUND_PREFIX + background, seed=seed + 7, width=width, height=height,
-            hd=hd, negative=BACKGROUND_NEGATIVE, detail=False, source_image=n,
-            denoise=denoise_for(bool(background))), photo)
-        data, ctype = compose_sprite(back, sprite), "image/png"
-        subject = join(subject, f"background: {background}" if background else "")
-    else:
-        if photo:
-            width, height = pw, ph
-        subject = character_prompt(join(desc, edit), opts["character"], opts["outfit"])
-        data = await _render(client, lambda n: build_still_graph(
-            subject, seed=seed, width=width, height=height, character=opts["character"], hd=hd,
-            source_image=n, denoise=denoise_for(bool(desc or edit))), photo)
-        ctype = "image/png"
-    if plan:
-        width, height = plan["size"]
-    elif hd:
-        width, height = _snap(width * HD_SCALE), _snap(height * HD_SCALE)
-    label = f"{ANIMA_UNET}+{STYLE_LORA}" + (f"+{char_lora(opts['character'])}" if opts["character"] else "")
-    meta = {"kind": "still", "aspect": opts["aspect"], "width": width, "height": height,
-            "character": opts["character"], "quality": opts["quality"], "layout": opts["layout"],
-            "prompt_used": subject}
-    if photo:
-        meta.update(kind="photo", aspect="photo", strength=strength, changes=opts.get("changes"))
-    if plan:
-        meta.update(kind="part", part=opts["part"], transparent=plan["alpha"] is not None)
-    return data, ctype, {"model_label": label, "seed_used": seed, "saga": meta}
+            meta.update(kind="photo", aspect="photo", strength=opts["strength"], denoise=denoise,
+                        changes=opts.get("changes"))
+        if count > 1:
+            meta.update(variant=i + 1, variants=count)
+        outputs.append((data, "image/png", {"model_label": label, "seed_used": s, "saga": meta}))
+    return outputs
+
+
+async def run_still(
+    client: Any, prompt: str, *, seed: Optional[int], aspect: Optional[str] = None,
+    options: Optional[dict[str, Any]] = None, image_bytes: Optional[bytes] = None,
+) -> tuple[bytes, str, dict]:
+    """First output of run_still_outputs."""
+    outputs = await run_still_outputs(client, prompt, seed=seed, aspect=aspect, options=options,
+                                      inputs={"image": image_bytes} if image_bytes else None)
+    return outputs[0]
+
+
+async def run_batch(
+    client: Any, prompt: str, *, seed: Optional[int], options: Optional[dict[str, Any]], bundle: bytes,
+    progress: Optional[Callable[[int, int], None]] = None,
+) -> tuple[bytes, str, dict]:
+    """Many part layers in one job with the same prompt, seed and settings (so a character stays the same
+    person) -> zip of the results under their upload names plus report.json. After 3 failures in a row
+    (GPU or tunnel down) it stops and returns what finished."""
+    files, manifest = unpack_inputs(bundle)
+    items = check_batch(files, manifest)["items"]
+    opts, words = await _still_setup(client, prompt, {**(options or {}), "layout": "part", "count": 1}, photo=True)
+    seed = seed if seed is not None else new_seed()
+    contexts: dict[str, Any] = {}
+    report: list[dict[str, Any]] = []
+    stopped, streak = None, 0
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as zf:
+        for i, item in enumerate(items):
+            item_opts = {**opts, "part": item.get("part") or opts["part"]}
+            subject, denoise = part_subject(item_opts, words), _part_denoise(item_opts, words)
+            names = [item["image"], *item["pair"]]
+            try:
+                ctx_name = item.get("context")
+                if ctx_name and ctx_name not in contexts:
+                    contexts[ctx_name] = open_layer(files[ctx_name])
+                images = await render_part_set(
+                    client, open_layer(files[item["image"]]), [open_layer(files[n]) for n in item["pair"]],
+                    context=contexts.get(ctx_name) if ctx_name else None, subject=subject, seed=seed,
+                    denoise=denoise, opts=item_opts)
+                for name, img in zip(names, images):
+                    zf.writestr(name, _png(img))
+                report.append({"image": item["image"], "ok": True, "outputs": names, "prompt_used": subject})
+                streak = 0
+            except Exception as exc:
+                logger.warning("Saga batch item %s failed: %s", item["image"], exc)
+                report.append({"image": item["image"], "ok": False, "error": str(exc)})
+                streak += 1
+                if streak >= 3:
+                    stopped = f"Stopped after 3 failures in a row: {exc}"
+            if progress:
+                progress(i + 1, len(items))
+            if stopped:
+                break
+        done = sum(1 for r in report if r["ok"])
+        if not done:
+            raise SagaError(stopped or report[-1].get("error") or "Every item failed")
+        shared_subject, shared_denoise = part_subject(opts, words), _part_denoise(opts, words)
+        summary = {"prompt_used": shared_subject, "seed_used": seed, "denoise": shared_denoise,
+                   "strength": opts["strength"], "quality": opts["quality"], "part": opts["part"],
+                   "keep_lines": opts["keep_lines"], "match_skin": opts["match_skin"],
+                   "done": done, "failed": len(report) - done, "total": len(items), "stopped": stopped,
+                   "items": report}
+        zf.writestr("report.json", json.dumps(summary, indent=1))
+    meta = {key: summary[key] for key in ("prompt_used", "denoise", "strength", "quality", "part", "keep_lines",
+                                          "match_skin", "done", "failed", "total", "stopped")}
+    meta.update(kind="batch", layout="part", character=opts["character"], changes=opts.get("changes"))
+    return buf.getvalue(), "application/zip", {"model_label": _label(opts["character"]), "seed_used": seed,
+                                               "saga": meta}
 
 
 def segment_plan(seconds: int) -> tuple[int, int]:
-    """(segments, frames per segment) — clips over 5 s are two chained segments sharing one frame."""
+    """(segments, frames per segment) â€” clips over 5 s are two chained segments sharing one frame."""
     segments = 1 if seconds <= SEGMENT_MAX_SECONDS else 2
     frames = round(seconds * VIDEO_FPS / segments)
     return segments, (frames // 4) * 4 + 1

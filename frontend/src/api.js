@@ -409,6 +409,12 @@ export async function startJob({
       if (saga.part) body.append("part", saga.part);
       if (saga.changes) body.append("changes", saga.changes);
       if (saga.rewrite === false) body.append("rewrite", "0");
+      if (saga.count > 1) body.append("count", String(saga.count));
+      if (saga.keepLines) body.append("keep_lines", "1");
+      if (saga.matchSkin) body.append("match_skin", "1");
+      if (saga.keepSize) body.append("keep_size", "1");
+      if (saga.context) body.append("context", saga.context, saga.context.name || "context.png");
+      if (saga.pair) body.append("pair", saga.pair, saga.pair.name || "pair.png");
     }
     if (engine) body.append("engine", engine);
     body.append("client_key", idem);

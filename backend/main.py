@@ -591,6 +591,13 @@ async def start_job(
     part: Optional[str] = Form(None),
     changes: Optional[str] = Form(None),
     rewrite: Optional[str] = Form(None),
+    context: Optional[UploadFile] = File(None),
+    pair: Optional[UploadFile] = File(None),
+    count: Optional[str] = Form(None),
+    denoise: Optional[str] = Form(None),
+    keep_lines: Optional[str] = Form(None),
+    match_skin: Optional[str] = Form(None),
+    keep_size: Optional[str] = Form(None),
     owner: str = Depends(require_owner),
 ):
     """
@@ -609,10 +616,15 @@ async def start_job(
     saga takes aspect, character, outfit ("0" drops her usual clothes), quality ("fast" | "hd"),
     layout ("scene" | "sprite" | "part") and background (sprite backdrop). An image sent with saga is a photo:
     scene restyles it (prompt optional), sprite uses it as the backdrop, part redraws one character layer
-    (part = face | hand | body | hair | other) keeping its canvas and transparency; strength "light" |
-    "medium" | "strong"; changes = plain-English edits to the image; rewrite="0" sends the prompt to the
-    model as written instead of converting it to tags. saga_vid animates the uploaded still for video_seconds (3, 5, 8, 10) at quality
-    ("smooth" 832 / "hd" 720p, both interpolated to 32 fps).
+    (part = face | hand | body | hair | other) repainting only inside its own outline and keeping its canvas
+    and transparency; strength "subtle" | "light" | "medium" | "strong" or an exact denoise (0.2-0.8);
+    changes = plain-English edits to the image; rewrite="0" sends the prompt to the model as written instead
+    of converting it to tags; count (1-4) renders seeds seed..seed+count-1. Part only: context = the layers
+    beneath (same canvas), pair = the talking face (rebuilt from the main result, redrawing only where it
+    differs), keep_lines="1" copies the original outlines back, match_skin="1" matches the skin tones to the
+    context. keep_size="1" returns scene/sprite photos at their own size. The job result carries
+    prompt_used, seed_used, denoise and every variant. saga_vid animates the uploaded still for
+    video_seconds (3, 5, 8, 10) at quality ("smooth" 832 / "hd" 720p, both interpolated to 32 fps).
     """
     prompt = (prompt or "").strip()
     is_saga_mode = mode in ("saga", "saga_vid")
@@ -666,7 +678,9 @@ async def start_job(
                 t2i_options = saga_mod.parse_still_options(
                     aspect=aspect, character=character, outfit=outfit, quality=quality,
                     layout=layout, background=background, photo=image is not None, strength=strength,
-                    part=part, changes=changes, rewrite=rewrite,
+                    part=part, changes=changes, rewrite=rewrite, count=count, denoise=denoise,
+                    keep_lines=keep_lines, match_skin=match_skin, keep_size=keep_size,
+                    context=context is not None, pair=pair is not None,
                 )
             else:
                 t2i_options = saga_mod.parse_motion_options(seconds=video_seconds, quality=quality)
@@ -707,6 +721,23 @@ async def start_job(
     if is_tester_owner(owner):
         is_test = True
     image_bytes = await _read_image_bytes(image, keep_alpha=mode == "saga") if image is not None else None
+    if mode == "saga" and image_bytes and (context is not None or pair is not None):
+        from backend import saga as saga_mod
+
+        extras = {"context": context, "pair": pair}
+        inputs = {"image": image_bytes}
+        for key, upload in extras.items():
+            if upload is not None:
+                inputs[key] = await _read_image_bytes(upload, keep_alpha=True)
+        sizes = {key: Image.open(io.BytesIO(data)).size for key, data in inputs.items()}
+        for key, size in sizes.items():
+            if size != sizes["image"]:
+                raise HTTPException(
+                    400,
+                    f"The {key} image is {size[0]}x{size[1]} but the layer is "
+                    f"{sizes['image'][0]}x{sizes['image'][1]}; they must be the same size",
+                )
+        image_bytes = saga_mod.pack_inputs(inputs)
     client = _comfy()
     settings = get_settings()
     if not await client.health(timeout=12.0, retries=3):
@@ -754,6 +785,117 @@ async def start_job(
             "mode": mode,
             "queue_position": job.get("queue_position"),
             "input_thumb_url": job.get("input_thumb_url"),
+        }
+    )
+
+
+SAGA_BATCH_MAX_FILES = 1000
+SAGA_BATCH_MAX_BYTES = 300 * 1024 * 1024
+
+
+@app.post("/api/saga/batch")
+async def saga_batch(
+    files: list[UploadFile] = File(...),
+    manifest: str = Form(...),
+    prompt: Optional[str] = Form(None),
+    changes: Optional[str] = Form(None),
+    seed: Optional[int] = Form(None),
+    strength: Optional[str] = Form(None),
+    denoise: Optional[str] = Form(None),
+    quality: Optional[str] = Form(None),
+    part: Optional[str] = Form(None),
+    keep_lines: Optional[str] = Form(None),
+    match_skin: Optional[str] = Form(None),
+    rewrite: Optional[str] = Form(None),
+    character: Optional[str] = Form(None),
+    outfit: Optional[str] = Form(None),
+    client_key: Optional[str] = Form(None),
+    owner: str = Depends(require_owner),
+):
+    """
+    Saga studio: redraw many part layers in one queued job with the same prompt, seed and settings, so a
+    character stays the same person across every face, talking face and animation frame.
+
+    files: every image the manifest names (repeat the "files" field; each upload's file name is its name in
+    the manifest). manifest: JSON {"items": [{"image": "f_gross.png", "context": "body.png",
+    "pair": "f_gross_talk.png" or ["frame2.png", ...], "part": "face"}]}; context, pair and part are optional.
+    The other fields work as in POST /api/jobs part mode (one variant per item; seed is fixed now if omitted).
+    Poll GET /api/jobs/{id}: progress = {done, total}; when done, result.media_url is a zip of the outputs
+    under the same names plus report.json. Delete it afterwards with DELETE /api/generations/{result.id}.
+    """
+    from backend import saga as saga_mod
+    from backend.prompt_fix import normalize_prompt
+
+    if not is_saga_owner(owner):
+        raise HTTPException(403, "This mode is not available for this PIN")
+    if len(files) > SAGA_BATCH_MAX_FILES:
+        raise HTTPException(400, f"At most {SAGA_BATCH_MAX_FILES} files per batch")
+    try:
+        manifest_data = json.loads(manifest)
+    except ValueError:
+        raise HTTPException(400, "manifest is not valid JSON") from None
+    uploads: dict[str, bytes] = {}
+    total = 0
+    try:
+        for upload in files:
+            raw = await upload.read()
+            if not raw:
+                raise HTTPException(400, f"'{upload.filename}' is empty")
+            total += len(raw)
+            if total > SAGA_BATCH_MAX_BYTES:
+                raise HTTPException(413, f"Batch uploads are limited to {SAGA_BATCH_MAX_BYTES // 2**20} MB")
+            name = saga_mod.safe_name(upload.filename or "")
+            if name in uploads:
+                raise HTTPException(400, f"'{name}' was uploaded twice")
+            uploads[name] = raw
+        clean = saga_mod.check_batch(uploads, manifest_data)
+        prompt = saga_mod.check_prompt(prompt or "", allow_empty=True)
+        options = saga_mod.parse_still_options(
+            layout="part", photo=True, strength=strength, part=part, changes=changes, rewrite=rewrite,
+            denoise=denoise, keep_lines=keep_lines, match_skin=match_skin, quality=quality,
+            character=character, outfit=outfit,
+        )
+    except saga_mod.SagaError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    used = {
+        name
+        for item in clean["items"]
+        for name in (item["image"], *item["pair"], *([item["context"]] if "context" in item else []))
+    }
+    bundle = saga_mod.pack_inputs({name: uploads[name] for name in used}, clean)
+    del uploads
+    options.update(batch=True, items=len(clean["items"]))
+    seed = seed if seed is not None else saga_mod.new_seed()
+
+    idem = db.normalize_client_key(client_key)
+    if idem:
+        existing = await db.find_job_by_client_key(owner, idem)
+        if existing:
+            return _json({"id": existing["id"], "status": existing.get("status") or "queued",
+                          "mode": "saga", "deduped": True})
+    if not await _comfy().health(timeout=12.0, retries=3):
+        raise HTTPException(503, "ComfyUI is not reachable. Start the GPU box and try again.")
+    prompt_en = normalize_prompt(prompt, mode="saga")["english"] or prompt
+    job = await db.create_job(
+        mode="saga",
+        prompt=prompt,
+        prompt_english=prompt_en,
+        seed=seed,
+        owner=owner,
+        image_bytes=bundle,
+        client_key=idem,
+        options=options,
+    )
+    del bundle
+    _kick_job_dispatcher()
+    return _json(
+        {
+            "id": job["id"],
+            "status": "queued",
+            "mode": "saga",
+            "items": len(clean["items"]),
+            "seed": seed,
+            "queue_position": job.get("queue_position"),
         }
     )
 
@@ -863,6 +1005,10 @@ async def job_input_thumb(
     raw = await db.get_job_input_bytes(job_id)
     if not raw:
         raise HTTPException(404, "No start image for this job")
+    from backend import saga as saga_mod
+
+    if saga_mod.is_bundle(raw):
+        raw = saga_mod.bundle_preview(raw)
     max_w = int(w)
     img = Image.open(io.BytesIO(raw)).convert("RGB")
     img.thumbnail((max_w, max_w * 2), Image.Resampling.LANCZOS)
@@ -888,6 +1034,7 @@ async def _execute_generation(
     owner: Optional[str] = None,
     extra_meta: Optional[dict] = None,
     options: Optional[dict] = None,
+    job_id: Optional[str] = None,
 ) -> dict:
     from backend.ai_engine import run as ai_engine_run
     from backend.ai_engine.schema import GenerateRequest
@@ -907,6 +1054,8 @@ async def _execute_generation(
     kind: Literal["img", "vid"] = "img"
     filename = "out.bin"
     engine_meta: dict = {}
+    # Saga stills can return several outputs (variants, talking faces); the first is the job's main result.
+    extra_outputs: list[tuple[bytes, str, dict]] = []
 
     try:
         if mode in ("saga", "saga_vid"):
@@ -914,10 +1063,22 @@ async def _execute_generation(
 
             opts = options or {}
             try:
-                if mode == "saga":
-                    data, content_type, engine_meta = await saga_mod.run_still(
-                        client, prompt_en, seed=seed, options=opts, image_bytes=image_bytes
+                if mode == "saga" and opts.get("batch"):
+                    assert image_bytes is not None
+
+                    def _progress(done: int, total: int) -> None:
+                        if job_id:
+                            db.update_job_sync(job_id, progress={"done": done, "total": total})
+
+                    data, content_type, engine_meta = await saga_mod.run_batch(
+                        client, prompt_en, seed=seed, options=opts, bundle=image_bytes, progress=_progress
                     )
+                elif mode == "saga":
+                    inputs = saga_mod.unpack_inputs(image_bytes)[0] if image_bytes else None
+                    outputs = await saga_mod.run_still_outputs(
+                        client, prompt_en, seed=seed, options=opts, inputs=inputs
+                    )
+                    (data, content_type, engine_meta), extra_outputs = outputs[0], outputs[1:]
                 else:
                     assert image_bytes is not None
                     data, content_type, engine_meta = await saga_mod.run_motion(
@@ -929,6 +1090,9 @@ async def _execute_generation(
             filename = f"wan_{kind}_{uuid.uuid4().hex}." + ("png" if kind == "img" else "mp4")
             if kind == "vid" and "webm" in content_type:
                 filename = filename.replace(".mp4", ".webm")
+            if content_type == "application/zip":
+                kind = "zip"
+                filename = f"wan_saga_batch_{uuid.uuid4().hex}.zip"
         elif mode == "t2i":
             from backend import t2i as t2i_mod
 
@@ -1020,6 +1184,19 @@ async def _execute_generation(
         else f"{settings.wan_unet_high}+{settings.wan_unet_low}"
     )
 
+    base_meta = {
+        "negative": negative,
+        "seed": seed,
+        "mode": mode,
+        "prompt_original": resolved["original"],
+        "prompt_english": prompt_en,
+        "video_seconds": video_seconds,
+        **{
+            k: v
+            for k, v in (extra_meta or {}).items()
+            if v not in (None, False, "")
+        },
+    }
     record = await db.store_media(
         data=data,
         filename=filename,
@@ -1028,22 +1205,23 @@ async def _execute_generation(
         prompt=prompt,
         model=str(model_label),
         owner=owner,
-        meta={
-            "negative": negative,
-            "seed": seed,
-            "mode": mode,
-            "prompt_original": resolved["original"],
-            "prompt_english": prompt_en,
-            "video_seconds": video_seconds,
-            **{
-                k: v
-                for k, v in (extra_meta or {}).items()
-                if v not in (None, False, "")
-            },
-            **engine_meta,
-        },
+        meta={**base_meta, **engine_meta},
     )
     del data
+    records = [(record, engine_meta)]
+    for extra_data, extra_type, extra_meta_out in extra_outputs:
+        extra_record = await db.store_media(
+            data=extra_data,
+            filename=f"wan_img_{uuid.uuid4().hex}.png",
+            content_type=extra_type,
+            kind="img",
+            prompt=prompt,
+            model=str(extra_meta_out.get("model_label") or model_label),
+            owner=owner,
+            meta={**base_meta, **extra_meta_out},
+        )
+        records.append((extra_record, extra_meta_out))
+    del extra_outputs
     gc.collect()
 
     if settings.zero_residue:
@@ -1051,7 +1229,7 @@ async def _execute_generation(
         if root:
             scrub_mod.wipe_our_artifacts(root, passes=max(1, settings.scrub_passes))
 
-    return {
+    payload = {
         "id": record["id"],
         "kind": record["kind"],
         "prompt": record["prompt"],
@@ -1061,12 +1239,33 @@ async def _execute_generation(
         "size_bytes": record["size_bytes"],
         "created_at": record["created_at"],
         "media_url": f"/api/media/{record['id']}",
-        "thumb_url": f"/api/media/{record['id']}/thumb?w=240",
+        "thumb_url": None if kind == "zip" else f"/api/media/{record['id']}/thumb?w=240",
         "local_residue": False,
         "workflow_ref": engine_meta.get("workflow_ref"),
         "task_type": engine_meta.get("task_type"),
         "seed": engine_meta.get("seed_used", seed),
     }
+    saga_meta = engine_meta.get("saga")
+    if saga_meta:
+        payload.update(
+            saga=saga_meta,
+            seed_used=engine_meta.get("seed_used"),
+            prompt_used=saga_meta.get("prompt_used"),
+            denoise=saga_meta.get("denoise"),
+        )
+        if len(records) > 1:
+            payload["variants"] = [
+                {
+                    "id": rec["id"],
+                    "media_url": f"/api/media/{rec['id']}",
+                    "thumb_url": f"/api/media/{rec['id']}/thumb?w=240",
+                    "seed_used": meta_out.get("seed_used"),
+                    "variant": (meta_out.get("saga") or {}).get("variant"),
+                    "role": (meta_out.get("saga") or {}).get("role"),
+                }
+                for rec, meta_out in records
+            ]
+    return payload
 
 
 async def _resume_persisted_job(job: dict) -> None:
@@ -1156,6 +1355,8 @@ async def _run_job(
     hard_limit = max(180, int(settings.comfyui_timeout_sec) + 90)
     if mode in ("vid", "saga_vid"):
         hard_limit = max(hard_limit, 7200)
+    if (options or {}).get("batch"):
+        hard_limit = max(hard_limit, 12 * 3600)
     try:
         # Bail early if cancelled between claim and Comfy submit.
         if not db.job_is_active_sync(job_id):
@@ -1174,6 +1375,7 @@ async def _run_job(
                 owner=owner,
                 extra_meta=extra_meta,
                 options=options,
+                job_id=job_id,
             ),
             timeout=hard_limit,
         )

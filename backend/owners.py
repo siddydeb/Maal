@@ -86,24 +86,54 @@ def owner_for_pin(pin: str) -> Optional[str]:
     return found
 
 
+SCRIPT_KEY_PREFIX = "sk_saga_"
+
+
+def _token_versions() -> dict[str, str]:
+    out: dict[str, str] = {}
+    for part in (get_settings().wan_token_versions or "").split(","):
+        owner, _, version = part.strip().partition(":")
+        if owner.strip() and version.strip():
+            out[owner.strip()] = version.strip()
+    return out
+
+
 def make_token(owner: str) -> str:
     secret = _secret()
     if not secret:
         raise ValueError("auth secret not configured")
     if owner not in owner_ids():
         raise ValueError("unknown owner")
-    sig = hmac.new(secret, owner.encode("utf-8"), hashlib.sha256).hexdigest()[:40]
+    version = _token_versions().get(owner)
+    signed = f"{owner}:v{version}" if version else owner
+    sig = hmac.new(secret, signed.encode("utf-8"), hashlib.sha256).hexdigest()[:40]
     return f"{owner}.{sig}"
+
+
+def script_key_digest(key: str) -> str:
+    return hashlib.sha256(key.strip().encode("utf-8")).hexdigest()
+
+
+def owner_from_script_key(key: str) -> Optional[str]:
+    """A long-lived Saga script key -> the Saga owner (which can only use the Saga studio)."""
+    saga = (get_settings().wan_saga_owner or "").strip()
+    digests = [d.strip().lower() for d in (get_settings().wan_saga_script_keys or "").split(",") if d.strip()]
+    if not saga or not digests or not key.startswith(SCRIPT_KEY_PREFIX):
+        return None
+    digest = script_key_digest(key)
+    return saga if any(hmac.compare_digest(digest, d) for d in digests) else None
 
 
 def owner_from_token(token: Optional[str]) -> Optional[str]:
     if not token or not isinstance(token, str):
         return None
-    if not _secret():
-        return None
     token = token.strip()
     if token.lower().startswith("bearer "):
         token = token[7:].strip()
+    if token.startswith(SCRIPT_KEY_PREFIX):
+        return owner_from_script_key(token)
+    if not _secret():
+        return None
     parts = token.split(".", 1)
     if len(parts) != 2:
         return None

@@ -2099,7 +2099,7 @@ button.gallery-item {
   }
 }
 
-/* Saga studio (PIN 1000) */
+/* Saga studio */
 .saga-ideas {
   display: flex;
   flex-wrap: wrap;
@@ -2182,6 +2182,19 @@ button.gallery-item {
 .saga-model-prompt {
   font-size: 0.78rem;
   color: var(--muted);
+}
+
+.saga-extra {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.saga-extra-thumb {
+  width: 64px;
+  height: 48px;
+  object-fit: contain;
+  border-radius: 6px;
 }
 
 .saga-guide {

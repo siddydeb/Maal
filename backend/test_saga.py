@@ -75,7 +75,7 @@ class OptionTests(unittest.TestCase):
     def test_still_options(self):
         opts = saga.parse_still_options()
         self.assertEqual(opts, {"aspect": "landscape", "character": None, "outfit": True, "quality": "hd",
-                                "layout": "scene", "background": None, "rewrite": True})
+                                "layout": "scene", "background": None, "rewrite": True, "count": 1})
         self.assertFalse(saga.parse_still_options(rewrite="0")["rewrite"])
         opts = saga.parse_still_options(character="Debbie", outfit="0", quality="fast")
         self.assertEqual((opts["character"], opts["outfit"], opts["quality"]), ("debbie", False, "fast"))
@@ -197,113 +197,278 @@ class GraphTests(unittest.TestCase):
     def test_part_options(self):
         with self.assertRaises(saga.SagaError):
             saga.parse_still_options(layout="part")
-        self.assertEqual(saga.parse_still_options(layout="part", photo=True)["strength"], "light")
+        opts = saga.parse_still_options(layout="part", photo=True)
+        self.assertEqual((opts["strength"], opts["denoise"], opts["count"]), ("light", None, 1))
+        self.assertEqual((opts["keep_lines"], opts["match_skin"]), (False, False))
+        opts = saga.parse_still_options(layout="part", photo=True, strength="Subtle", denoise="0.35", count="4",
+                                        keep_lines="1", match_skin="1", context=True, pair=True)
+        self.assertEqual((opts["strength"], opts["denoise"], opts["count"]), ("subtle", 0.35, 4))
+        self.assertEqual((opts["keep_lines"], opts["match_skin"]), (True, True))
+        for bad in ({"denoise": "0.9"}, {"denoise": "x"}, {"count": "5"}, {"count": "0"}):
+            with self.assertRaises(saga.SagaError, msg=bad):
+                saga.parse_still_options(layout="part", photo=True, **bad)
+        with self.assertRaises(saga.SagaError):
+            saga.parse_still_options(photo=True, context=True)
+        self.assertTrue(saga.parse_still_options(photo=True, keep_size="1")["keep_size"])
 
-    def test_part_round_trip_keeps_canvas_and_alpha(self):
+    def _face(self, size=(1024, 768), box=(691, 172, 786, 314), colour=(210, 160, 140)):
         from PIL import Image
 
-        src = Image.new("RGBA", (301, 517), (0, 0, 0, 0))
-        src.paste((200, 150, 120, 255), (60, 90, 240, 400))
-        buf = BytesIO()
-        src.save(buf, format="PNG")
-        png, w16, h16, plan = saga.prepare_part(buf.getvalue())
-        self.assertEqual((w16 % 16, h16 % 16, max(w16, h16)), (0, 0, saga.PHOTO_BOX))
-        prepared = Image.open(BytesIO(png))
-        self.assertEqual(prepared.mode, "RGB")
-        corner = prepared.getpixel((2, 2))
-        self.assertTrue(all(abs(v - t) <= 2 for v, t in zip(corner, (200, 150, 120))), corner)
+        img = Image.new("RGBA", size, (0, 0, 0, 0))
+        img.paste((*colour, 255), box)
+        return img
 
-        hd = prepared.resize((round(w16 * 1.5), round(h16 * 1.5)))
-        out_buf = BytesIO()
-        hd.save(out_buf, format="PNG")
-        out = Image.open(BytesIO(saga.finish_part(out_buf.getvalue(), plan)))
-        self.assertEqual((out.mode, out.size), ("RGBA", (301, 517)))
-        self.assertEqual(list(out.getchannel("A").getdata()), list(src.getchannel("A").getdata()))
-
-    def test_small_part_is_cropped_and_put_back_in_place(self):
+    def test_prepare_part_sheet_has_picture_and_mask(self):
         from PIL import Image
 
-        src = Image.new("RGBA", (1024, 768), (0, 0, 0, 0))
-        src.paste((210, 160, 140, 255), (691, 172, 786, 314))
-        buf = BytesIO()
-        src.save(buf, format="PNG")
-        png, w16, h16, plan = saga.prepare_part(buf.getvalue())
+        layer = self._face()
+        png, w16, h16, plan = saga.prepare_part(layer)
         x0, y0, x1, y1 = plan["region"]
         self.assertTrue(x0 < 691 and y0 < 172 and x1 > 786 and y1 > 314 and x1 - x0 < 200)
-        self.assertEqual(max(w16, h16), saga.PHOTO_BOX)
+        self.assertEqual((w16 % 16, h16 % 16, max(w16, h16)), (0, 0, saga.PART_BOX))
+        sheet = Image.open(BytesIO(png))
+        self.assertEqual((sheet.mode, sheet.size), ("RGB", (w16 * 2, h16)))
+        left, top, w, h = plan["inner"]
+        cx, cy = left + w // 2, top + h // 2
+        self.assertTrue(all(abs(v - t) <= 3 for v, t in zip(sheet.getpixel((cx, cy)), (210, 160, 140))))
+        self.assertEqual(sheet.getpixel((w16 + cx, cy)), (255, 255, 255))
+        self.assertEqual(sheet.getpixel((w16 + 1, 1)), (0, 0, 0))
 
-        out = Image.open(BytesIO(saga.finish_part(png, plan)))
-        self.assertEqual((out.mode, out.size), ("RGBA", (1024, 768)))
-        self.assertEqual(list(out.getchannel("A").getdata()), list(src.getchannel("A").getdata()))
-        r, g, b, _ = out.getpixel((738, 243))
+        rendered = sheet.crop((0, 0, w16, h16)).resize((round(w16 * 1.5), round(h16 * 1.5)))
+        out = saga.finish_part(self._png(rendered), plan)
+        self.assertEqual((out.mode, out.size), ("RGB", (1024, 768)))
+        r, g, b = out.getpixel((738, 243))
         self.assertTrue(abs(r - 210) < 6 and abs(g - 160) < 6 and abs(b - 140) < 6, (r, g, b))
+        cut = saga.with_alpha(out, layer)
+        self.assertEqual(list(cut.getchannel("A").getdata()), list(layer.getchannel("A").getdata()))
+
+    def test_prepare_part_uses_context_and_custom_repaint(self):
+        from PIL import Image
+
+        layer = self._face()
+        context = Image.new("RGBA", layer.size, (20, 40, 200, 255))
+        repaint = Image.new("L", layer.size, 0)
+        repaint.paste(255, (720, 280, 760, 300))
+        png, w16, h16, plan = saga.prepare_part(layer, context=context, repaint=repaint)
+        sheet = Image.open(BytesIO(png))
+        self.assertTrue(all(abs(v - t) <= 3 for v, t in zip(sheet.getpixel((2, 2)), (20, 40, 200))))
+        left, top, w, h = plan["inner"]
+        self.assertEqual(sheet.getpixel((w16 + left + w // 2, top + h // 2)), (0, 0, 0))
 
     def test_part_without_alpha_stays_opaque(self):
         from PIL import Image
 
+        layer = Image.new("RGBA", (200, 120), (10, 20, 30, 255))
+        _, w16, h16, plan = saga.prepare_part(layer)
+        self.assertEqual(plan["region"], (0, 0, 200, 120))
+        rendered = self._png(Image.new("RGB", (w16, h16)))
+        self.assertEqual(saga.with_alpha(saga.finish_part(rendered, plan), layer).mode, "RGB")
+
+    def test_masked_graph(self):
+        g = saga.build_still_graph("x", seed=1, width=512, height=640, hd=True, detail=False,
+                                   source_image="sheet.png", denoise=0.3, masked=True)
+        self.assertEqual((g["51"]["inputs"]["x"], g["52"]["inputs"]["x"], g["52"]["inputs"]["width"]), (0, 512, 512))
+        self.assertEqual(g["7"]["class_type"], "SetLatentNoiseMask")
+        self.assertEqual(g["54"]["inputs"]["pixels"], ["51", 0])
+        self.assertEqual(g["15"]["inputs"]["latent_image"], ["55", 0])
+        self.assertEqual(g["55"]["inputs"]["mask"], ["53", 0])
+        self.assertNotIn("17", g)
+
+    class _PartClient:
+        """Returns a flat colour per render (cycling through colours) and records graphs."""
+
+        def __init__(self, colours=((90, 90, 90),), tags=None):
+            self.colours, self.tags, self.graphs, self.asked = list(colours), tags, [], []
+
+        async def run_text(self, graph):
+            self.asked.append(graph["2"]["inputs"]["prompt"])
+            if self.tags is None:
+                raise AssertionError("rewrite should not run")
+            return self.tags
+
+        async def _upload_image(self, data):
+            return "sheet.png"
+
+        async def _run_and_fetch(self, graph, prefer, input_name):
+            from PIL import Image
+
+            colour = self.colours[len(self.graphs) % len(self.colours)]
+            self.graphs.append(graph)
+            out = BytesIO()
+            Image.new("RGB", (graph["51"]["inputs"]["width"], graph["51"]["inputs"]["height"]), colour).save(out, "PNG")
+            return out.getvalue(), "image/png"
+
+    def _png(self, img):
         buf = BytesIO()
-        Image.new("RGB", (200, 120), (10, 20, 30)).save(buf, format="PNG")
-        png, _, _, plan = saga.prepare_part(buf.getvalue())
-        out = Image.open(BytesIO(saga.finish_part(png, plan)))
-        self.assertEqual((out.mode, out.size), ("RGB", (200, 120)))
+        img.save(buf, format="PNG")
+        return buf.getvalue()
 
     def test_run_still_part(self):
         from PIL import Image
 
-        graphs = []
-
-        class _Client:
-            async def _upload_image(self, data):
-                return "part.png"
-
-            async def _run_and_fetch(self, graph, prefer, input_name):
-                graphs.append(graph)
-                out = BytesIO()
-                Image.new("RGB", (96, 160), (90, 90, 90)).save(out, format="PNG")
-                return out.getvalue(), "image/png"
-
-        src = BytesIO()
-        Image.new("RGBA", (300, 500), (255, 0, 0, 0)).save(src, format="PNG")
-        data, _, meta = asyncio.run(saga.run_still(_Client(), "left hand, open palm", seed=3,
-                                                   options={"layout": "part"}, image_bytes=src.getvalue()))
-        graph = graphs[0]
+        client = self._PartClient()
+        layer = self._face(size=(300, 500), box=(50, 60, 250, 400))
+        data, _, meta = asyncio.run(saga.run_still(client, "left hand, open palm", seed=3,
+                                                   options={"layout": "part"}, image_bytes=self._png(layer)))
+        graph = client.graphs[0]
         self.assertEqual(graph["8"]["inputs"]["denoise"], saga.STRENGTHS["light"])
-        self.assertTrue(graph["5"]["inputs"]["text"].endswith("left hand, open palm, " + saga.PART_SUFFIX))
-        self.assertEqual(Image.open(BytesIO(data)).size, (300, 500))
-        self.assertEqual((meta["saga"]["kind"], meta["saga"]["transparent"], meta["saga"]["width"]),
-                         ("part", True, 300))
+        self.assertEqual(graph["7"]["class_type"], "SetLatentNoiseMask")
+        self.assertEqual(graph["6"]["inputs"]["text"], saga.PART_NEGATIVE)
+        self.assertTrue(graph["5"]["inputs"]["text"].endswith(
+            f"left hand, open palm, {saga.PART_STYLE}, {saga.PART_SUFFIX}"))
+        out = Image.open(BytesIO(data))
+        self.assertEqual((out.size, out.getpixel((150, 200))), ((300, 500), (90, 90, 90, 255)))
+        self.assertEqual(list(out.getchannel("A").getdata()), list(layer.getchannel("A").getdata()))
+        self.assertEqual((meta["saga"]["kind"], meta["saga"]["transparent"], meta["saga"]["denoise"]),
+                         ("part", True, 0.5))
 
-    def test_run_still_part_rewrites_and_applies_changes(self):
-        from PIL import Image
-
-        graphs, asked = [], []
-
-        class _Client:
-            async def run_text(self, graph):
-                asked.append(graph["2"]["inputs"]["prompt"])
-                return "<think>\n\n</think>\n\nTags: blue eyes, dark lipstick, blue eyes, smiling"
-
-            async def _upload_image(self, data):
-                return "part.png"
-
-            async def _run_and_fetch(self, graph, prefer, input_name):
-                graphs.append(graph)
-                out = BytesIO()
-                Image.new("RGB", (96, 160), (90, 90, 90)).save(out, format="PNG")
-                return out.getvalue(), "image/png"
-
-        src = BytesIO()
-        Image.new("RGBA", (300, 500), (255, 0, 0, 0)).save(src, format="PNG")
+    def test_part_changes_keep_strength(self):
+        client = self._PartClient(tags="<think>\n\n</think>\n\nTags: blue eyes, dark lipstick, blue eyes, smiling")
         _, _, meta = asyncio.run(saga.run_still(
-            _Client(), "", seed=3, image_bytes=src.getvalue(),
+            client, "", seed=3, image_bytes=self._png(self._face()),
             options={"layout": "part", "part": "face", "strength": "light",
                      "changes": "make her eyes blue and give her darker lipstick"}))
-        self.assertEqual(len(asked), 1)
-        text = graphs[0]["5"]["inputs"]["text"]
-        self.assertIn(saga.PART_TYPES["face"] + ", blue eyes, dark lipstick, smiling", text)
-        self.assertEqual(graphs[0]["8"]["inputs"]["denoise"], saga.STRENGTHS["medium"])
-        self.assertEqual((meta["saga"]["part"], meta["saga"]["strength"]), ("face", "medium"))
+        self.assertEqual(len(client.asked), 1)
+        self.assertIn(saga.PART_TYPES["face"] + ", blue eyes, dark lipstick, smiling", client.graphs[0]["5"]["inputs"]["text"])
+        self.assertEqual(client.graphs[0]["8"]["inputs"]["denoise"], saga.STRENGTHS["light"])
+        self.assertEqual((meta["saga"]["part"], meta["saga"]["strength"]), ("face", "light"))
         self.assertTrue(meta["saga"]["prompt_used"].startswith(saga.PART_TYPES["face"]))
+
+    def test_exact_denoise_wins(self):
+        client = self._PartClient()
+        _, _, meta = asyncio.run(saga.run_still(client, "", seed=1, image_bytes=self._png(self._face()),
+                                                options={"layout": "part", "strength": "strong", "denoise": 0.35}))
+        self.assertEqual((client.graphs[0]["8"]["inputs"]["denoise"], meta["saga"]["denoise"]), (0.35, 0.35))
+
+    def test_variants_and_talking_pair(self):
+        from PIL import Image
+
+        layer = self._face()
+        talking = layer.copy()
+        talking.paste((60, 20, 20, 255), (725, 280, 750, 295))
+        client = self._PartClient(colours=((90, 90, 90), (200, 10, 10)))
+        outputs = asyncio.run(saga.run_still_outputs(
+            client, "", seed=7, options={"layout": "part", "part": "face", "count": 2},
+            inputs={"image": self._png(layer), "pair": self._png(talking)}))
+        self.assertEqual([(m["seed_used"], m["saga"]["role"], m["saga"]["variant"]) for _, _, m in outputs],
+                         [(7, "main", 1), (7, "pair", 1), (8, "main", 2), (8, "pair", 2)])
+        self.assertEqual([g["8"]["inputs"]["seed"] for g in client.graphs], [7, 7, 8, 8])
+        main, pair = (Image.open(BytesIO(d)) for d, _, _ in outputs[:2])
+        self.assertEqual(main.getpixel((700, 200)), pair.getpixel((700, 200)))
+        self.assertEqual(pair.getpixel((737, 287)), (200, 10, 10, 255))
+        self.assertEqual(main.getpixel((737, 287)), (90, 90, 90, 255))
+        self.assertEqual(list(pair.getchannel("A").getdata()), list(talking.getchannel("A").getdata()))
+
+    def test_context_and_pair_must_match_size(self):
+        with self.assertRaises(saga.SagaError):
+            asyncio.run(saga.run_still_outputs(
+                self._PartClient(), "", seed=1, options={"layout": "part"},
+                inputs={"image": self._png(self._face()), "context": self._png(self._face(size=(800, 600)))}))
+
+    def test_keep_lines(self):
+        from PIL import Image
+
+        original = self._face()
+        original.paste((40, 25, 15, 255), (700, 200, 780, 203))
+        result = Image.new("RGB", original.size, (120, 200, 120))
+        out = saga.keep_lines(result, original)
+        self.assertEqual(out.getpixel((740, 201)), (40, 25, 15))
+        self.assertEqual(out.getpixel((740, 250)), (120, 200, 120))
+        self.assertEqual(out.getpixel((10, 10)), (120, 200, 120))
+
+    def test_match_skin_moves_skin_to_reference(self):
+        from PIL import Image
+
+        layer = self._face(colour=(248, 192, 152))
+        layer.paste((40, 25, 15, 255), (700, 200, 780, 205))
+        result = Image.new("RGB", layer.size, (200, 120, 80))
+        result.paste((40, 25, 15), (700, 200, 780, 205))
+        result.paste((200, 80, 100), (730, 280, 750, 290))
+        params = saga.skin_params(result, layer, layer)
+        self.assertIsNotNone(params)
+        out = saga.match_skin(result, layer.getchannel("A"), params)
+        self.assertTrue(all(abs(v - t) <= 4 for v, t in zip(out.getpixel((740, 260)), (248, 192, 152))),
+                        out.getpixel((740, 260)))
+        self.assertEqual(out.getpixel((740, 202)), (40, 25, 15))
+        self.assertEqual(out.getpixel((740, 285)), (200, 80, 100))
+        self.assertIs(saga.match_skin(result, layer.getchannel("A"), None), result)
+
+    def test_bundle_round_trip(self):
+        blob = saga.pack_inputs({"image": b"a", "pair": b"b"})
+        self.assertTrue(saga.is_bundle(blob))
+        self.assertEqual(saga.unpack_inputs(blob), ({"image": b"a", "pair": b"b"}, None))
+        self.assertEqual(saga.unpack_inputs(b"\x89PNG"), ({"image": b"\x89PNG"}, None))
+        self.assertEqual(saga.bundle_preview(saga.pack_inputs({"x/f.png": b"f"}, {"items": [{"image": "x/f.png"}]})), b"f")
+        self.assertEqual(saga.safe_name("jenny\\faces\\f_gross.png"), "jenny/faces/f_gross.png")
+        for bad in ("../x.png", "", "a/../b.png"):
+            with self.assertRaises(saga.SagaError):
+                saga.safe_name(bad)
+
+    def test_check_batch(self):
+        face, talk = self._png(self._face()), self._png(self._face())
+        small = self._png(self._face(size=(800, 600), box=(10, 10, 50, 50)))
+        files = {"f.png": face, "f_talk.png": talk, "body.png": face, "small.png": small}
+        clean = saga.check_batch(files, {"items": [{"image": "f.png", "pair": "f_talk.png", "context": "body.png"},
+                                                   {"image": "small.png", "part": "Hand"}]})
+        self.assertEqual(clean["items"], [{"image": "f.png", "pair": ["f_talk.png"], "context": "body.png"},
+                                          {"image": "small.png", "pair": [], "part": "hand"}])
+        for bad in ({}, {"items": []}, {"items": [{"image": "missing.png"}]},
+                    {"items": [{"image": "f.png", "pair": "small.png"}]}, {"items": [{"pair": "f.png"}]}):
+            with self.assertRaises(saga.SagaError, msg=bad):
+                saga.check_batch(files, bad)
+
+    def test_run_batch(self):
+        import json
+        import zipfile
+
+        from PIL import Image
+
+        layer = self._face()
+        talking = layer.copy()
+        talking.paste((60, 20, 20, 255), (725, 280, 750, 295))
+        files = {"f.png": self._png(layer), "f_talk.png": self._png(talking), "h.png": self._png(self._face())}
+        bundle = saga.pack_inputs(files, {"items": [{"image": "f.png", "pair": "f_talk.png"}, {"image": "h.png", "part": "hand"}]})
+        client, seen = self._PartClient(), []
+        data, ctype, meta = asyncio.run(saga.run_batch(
+            client, "", seed=11, options={"part": "face", "strength": "subtle", "keep_lines": True},
+            bundle=bundle, progress=lambda done, total: seen.append((done, total))))
+        self.assertEqual((ctype, meta["seed_used"], meta["saga"]["done"], seen), ("application/zip", 11, 2, [(1, 2), (2, 2)]))
+        self.assertEqual({g["8"]["inputs"]["seed"] for g in client.graphs}, {11})
+        self.assertEqual(client.graphs[0]["8"]["inputs"]["denoise"], saga.STRENGTHS["subtle"])
+        self.assertIn(saga.PART_TYPES["hand"], client.graphs[2]["5"]["inputs"]["text"])
+        with zipfile.ZipFile(BytesIO(data)) as zf:
+            self.assertEqual(sorted(zf.namelist()), ["f.png", "f_talk.png", "h.png", "report.json"])
+            report = json.loads(zf.read("report.json"))
+            self.assertEqual(Image.open(BytesIO(zf.read("f_talk.png"))).size, (1024, 768))
+        self.assertEqual((report["seed_used"], report["done"], report["failed"]), (11, 2, 0))
+
+    def test_run_batch_stops_after_three_failures(self):
+        class _Down(self._PartClient):
+            async def _upload_image(self, data):
+                raise RuntimeError("tunnel down")
+
+        face = self._png(self._face())
+        files = {f"{i}.png": face for i in range(5)}
+        bundle = saga.pack_inputs(files, {"items": [{"image": f"{i}.png"} for i in range(5)]})
+        with self.assertRaises(saga.SagaError):
+            asyncio.run(saga.run_batch(_Down(), "", seed=1, options={}, bundle=bundle))
+
+    def test_keep_size_returns_photo_size(self):
+        from PIL import Image
+
+        class _Client:
+            async def _upload_image(self, data):
+                return "up.png"
+
+            async def _run_and_fetch(self, graph, prefer, input_name):
+                out = BytesIO()
+                Image.new("RGB", (1344, 1008)).save(out, format="PNG")
+                return out.getvalue(), "image/png"
+
+        src = self._png(Image.new("RGB", (1024, 768)))
+        data, _, meta = asyncio.run(saga.run_still(_Client(), "", seed=1, image_bytes=src,
+                                                   options={"keep_size": True, "quality": "fast"}))
+        self.assertEqual((Image.open(BytesIO(data)).size, meta["saga"]["width"]), ((1024, 768), 1024))
 
     def test_rewrite_off_keeps_words(self):
         from PIL import Image

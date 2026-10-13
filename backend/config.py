@@ -78,6 +78,10 @@ class Settings(BaseSettings):
     wan_tester_owner: str = "utester"
     # Saga studio owner (Summertime Saga style only). Override with WAN_SAGA_OWNER.
     wan_saga_owner: str = "usaga"
+    # Bump an owner's version to cancel all of its old login tokens: "usaga:2,u9977:1".
+    wan_token_versions: str = ""
+    # Saga script keys (sk_saga_…) as comma-separated SHA-256 hex digests; drop a digest to revoke that key.
+    wan_saga_script_keys: str = ""
 
     # Ops UI (admin owner only) — restart Render / update tunnel / bounce GPU Comfy
     render_api_key: Optional[str] = None  # RENDER_API_KEY

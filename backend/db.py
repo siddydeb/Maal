@@ -257,7 +257,8 @@ def _generation_query(
     test_run: Optional[bool] = None,
     preset_id: Optional[str] = None,
 ) -> dict[str, Any]:
-    query: dict[str, Any] = {}
+    # Saga batch results are zips fetched by the script, not library items.
+    query: dict[str, Any] = {"kind": {"$ne": "zip"}}
     if owner:
         query["owner"] = owner
     if test_run is True:

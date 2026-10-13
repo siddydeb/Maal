@@ -46,9 +46,15 @@ const LAYOUTS = [
   ["part", "Part"],
 ];
 const STRENGTHS = [
+  ["subtle", "Subtle"],
   ["light", "Light"],
   ["medium", "Medium"],
   ["strong", "Strong"],
+];
+const VARIANTS = [
+  [1, "1"],
+  [2, "2"],
+  [4, "4"],
 ];
 const VIDEO_QUALITIES = [
   ["smooth", "Smooth"],
@@ -83,6 +89,55 @@ function Segment({ label, options, value, onChange }) {
     </div>
   );
 }
+function ExtraImage({ label, hint, file, onPick }) {
+  const input = useRef(null);
+  const [url, setUrl] = useState("");
+  useEffect(() => {
+    if (!file) {
+      setUrl("");
+      return undefined;
+    }
+    const objectUrl = URL.createObjectURL(file);
+    setUrl(objectUrl);
+    return () => URL.revokeObjectURL(objectUrl);
+  }, [file]);
+  return (
+    <div className="setting-row">
+      <div className="setting-label">
+        <span>{label}</span>
+        <span className="setting-hint">{hint}</span>
+      </div>
+      <input
+        ref={input}
+        type="file"
+        accept="image/*"
+        hidden
+        onChange={(e) => {
+          const picked = e.target.files?.[0];
+          e.target.value = "";
+          if (picked) onPick(picked);
+        }}
+      />
+      {file ? (
+        <span className="saga-extra">
+          <img className="saga-extra-thumb saga-checker" src={url} alt="" />
+          <button type="button" className="ghost" onClick={() => onPick(null)}>
+            remove
+          </button>
+        </span>
+      ) : (
+        <button type="button" className="ghost" onClick={() => input.current?.click()}>
+          Add
+        </button>
+      )}
+    </div>
+  );
+}
+
+function estimate(seconds) {
+  return seconds < 90 ? `about ${seconds} seconds` : `about ${Math.round(seconds / 60)} minutes`;
+}
+
 const isVideo = (item) => item?.kind === "vid" || (item?.content_type || "").startsWith("video/");
 
 export default function SagaStudio() {
@@ -117,6 +172,12 @@ export default function SagaStudio() {
   const [partType, setPartType] = useState("face");
   const [changes, setChanges] = useState("");
   const [rewrite, setRewrite] = useState(() => localStorage.getItem(REWRITE_KEY) !== "0");
+  const [count, setCount] = useState(1);
+  const [context, setContext] = useState(null);
+  const [pair, setPair] = useState(null);
+  const [keepLines, setKeepLines] = useState(false);
+  const [matchSkin, setMatchSkin] = useState(false);
+  const [keepSize, setKeepSize] = useState(false);
   const [tab, setTab] = useState("studio");
   const pollRef = useRef(null);
   const photoInput = useRef(null);
@@ -236,7 +297,7 @@ export default function SagaStudio() {
 
   function onPickLayout(next) {
     setLayout(next);
-    if (next === "part") setStrength("light");
+    if (next === "part") setStrength("subtle");
   }
 
   async function onGenerate(e) {
@@ -258,10 +319,16 @@ export default function SagaStudio() {
       part: part ? partType : undefined,
       changes: photo && !sprite && changes.trim() ? changes.trim() : undefined,
       rewrite,
+      count,
+      context: part && context ? context : undefined,
+      pair: part && pair ? pair : undefined,
+      keepLines: part && keepLines,
+      matchSkin: part && matchSkin,
+      keepSize: photo && !part && keepSize,
     };
     const base =
       text || changes.trim() || (part ? `${partType} part in Saga style` : "Photo in Saga style");
-    const label = picked ? `${picked.label}: ${base}` : base;
+    const label = (picked ? `${picked.label}: ${base}` : base) + (count > 1 ? ` (×${count})` : "");
     await enqueue({ mode: "saga", prompt: text, saga, file: photo || undefined }, label);
   }
 
@@ -399,9 +466,15 @@ export default function SagaStudio() {
                         <Segment label="Strength" options={STRENGTHS} value={strength} onChange={setStrength} />
                         <p className="setting-hint">
                           {part
-                            ? "Light keeps the shape closest (fingers, pose) · Strong changes more. Saying what the part is helps a lot."
+                            ? "Only the part's own pixels are redrawn. Subtle keeps the expression · Strong changes more."
                             : "Light keeps more of the photo · Strong looks more like the game. A short description below gives a much stronger game look."}
                         </p>
+                        {!part && (
+                          <label className="train-auto">
+                            <input type="checkbox" checked={keepSize} onChange={(e) => setKeepSize(e.target.checked)} />
+                            <span>Give it back at my photo's exact size</span>
+                          </label>
+                        )}
                         <button type="button" className="ghost" onClick={() => setPhoto(null)}>
                           {part ? "remove image" : "remove photo"}
                         </button>
@@ -411,6 +484,30 @@ export default function SagaStudio() {
                     <button type="button" className="ghost" onClick={() => photoInput.current?.click()}>
                       {part ? "Add part image" : "Add photo"}
                     </button>
+                  )}
+                  {part && photo && (
+                    <>
+                      <ExtraImage
+                        label="Layers underneath (optional)"
+                        hint="The body/hair beneath this part, same canvas size. Helps it blend in."
+                        file={context}
+                        onPick={setContext}
+                      />
+                      <ExtraImage
+                        label="Talking face (optional)"
+                        hint="Its talking version, same canvas size. Rebuilt from the result so it never flickers."
+                        file={pair}
+                        onPick={setPair}
+                      />
+                      <label className="train-auto">
+                        <input type="checkbox" checked={keepLines} onChange={(e) => setKeepLines(e.target.checked)} />
+                        <span>Keep the original outlines (same face, new colours or details)</span>
+                      </label>
+                      <label className="train-auto">
+                        <input type="checkbox" checked={matchSkin} onChange={(e) => setMatchSkin(e.target.checked)} />
+                        <span>Match the skin colour to the layers underneath (or to the original)</span>
+                      </label>
+                    </>
                   )}
                 </div>
 
@@ -475,8 +572,9 @@ export default function SagaStudio() {
                       onChange={(e) => setChanges(e.target.value.slice(0, CHANGES_MAX))}
                     />
                     <p className="setting-hint">
-                      Changes need room to redraw, so Light is raised to Medium when you ask for changes. Use Strong
-                      for big changes (different hair, new outfit).
+                      {part
+                        ? "Strength stays as you set it. Colour changes (eyes, lipstick, freckles) work even on Subtle; use Medium or Strong to change shapes."
+                        : "Changes need room to redraw, so Light is raised to Medium when you ask for changes. Use Strong for big changes (different hair, new outfit)."}
                     </p>
                   </div>
                 )}
@@ -530,6 +628,13 @@ export default function SagaStudio() {
                     </div>
                     <Segment label="Layout" options={LAYOUTS} value={layout} onChange={onPickLayout} />
                   </div>
+                  <div className="setting-row">
+                    <div className="setting-label">
+                      <span>Variants</span>
+                      <span className="setting-hint">Each on the next seed; pick the best one from the library</span>
+                    </div>
+                    <Segment label="Variants" options={VARIANTS} value={count} onChange={setCount} />
+                  </div>
                 </div>
 
                 <button type="submit" className="go" disabled={busy || !canGenerate}>
@@ -540,7 +645,8 @@ export default function SagaStudio() {
                     {busy && <span className="spinner" />}
                   </span>
                   <span className="go-sub">
-                    {quality === "hd" ? "about 1–2 minutes" : "about 30 seconds"} · tap any image to animate it
+                    {estimate((quality === "hd" ? 90 : 30) * count * (part && pair ? 2 : 1))} · tap any image to
+                    animate it
                   </span>
                 </button>
                 {error && <p className="status error">{error}</p>}
@@ -652,6 +758,14 @@ export default function SagaStudio() {
             )}
             {viewer.meta?.saga?.prompt_used && (
               <p className="lightbox-caption saga-model-prompt">Model read: {viewer.meta.saga.prompt_used}</p>
+            )}
+            {viewer.meta?.seed_used != null && viewer.meta?.saga && (
+              <p className="lightbox-caption saga-model-prompt">
+                Seed {viewer.meta.seed_used}
+                {viewer.meta.saga.denoise != null && ` · denoise ${viewer.meta.saga.denoise}`}
+                {viewer.meta.saga.variants > 1 && ` · variant ${viewer.meta.saga.variant} of ${viewer.meta.saga.variants}`}
+                {viewer.meta.saga.role === "pair" && " · talking face"}
+              </p>
             )}
             {!isVideo(viewer) && (
               <div className="saga-animate">
