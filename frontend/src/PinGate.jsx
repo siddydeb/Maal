@@ -102,7 +102,12 @@ export default function PinGate({ children }) {
             <p className="pin-brand">Wan</p>
           </div>
           <p className="pin-tag">Create. Transform. Wow.</p>
-          {!statusReady || locked ? (
+          {!statusReady ? (
+            <>
+              <h1 className="pin-title">Connecting…</h1>
+              <p className="pin-sub">Waking up the server, this can take up to a minute.</p>
+            </>
+          ) : locked ? (
             <>
               <h1 className="pin-title">Access locked</h1>
               <p className="pin-sub">
