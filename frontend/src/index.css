@@ -2175,6 +2175,10 @@ button.gallery-item {
   margin: 0.5rem 0;
 }
 
+.app-header-actions.saga-header-actions {
+  display: flex;
+}
+
 .saga-photo {
   display: flex;
   gap: 0.9rem;

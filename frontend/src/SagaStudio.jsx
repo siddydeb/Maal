@@ -167,6 +167,23 @@ export default function SagaStudio() {
     }
   }
 
+  const viewerOpen = Boolean(viewer);
+  useEffect(() => {
+    if (!viewerOpen) return undefined;
+    window.history.pushState({ sagaViewer: true }, "");
+    const close = () => setViewer(null);
+    const onKey = (e) => {
+      if (e.key === "Escape") close();
+    };
+    window.addEventListener("popstate", close);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("popstate", close);
+      window.removeEventListener("keydown", onKey);
+      if (window.history.state?.sagaViewer) window.history.back();
+    };
+  }, [viewerOpen]);
+
   useEffect(() => {
     if (!photo) {
       setPhotoUrl("");
@@ -271,9 +288,9 @@ export default function SagaStudio() {
               <span className="app-tagline">Summertime Saga style studio</span>
             </span>
           </div>
-          <div className="app-header-actions">
-            <button type="button" className="ghost" onClick={lock}>
-              Lock
+          <div className="app-header-actions saga-header-actions">
+            <button type="button" className="ghost" onClick={lock} title="Log out / switch PIN">
+              Log out
             </button>
           </div>
         </header>
