@@ -31,6 +31,31 @@ class PromptGuardTests(unittest.TestCase):
                 saga.check_prompt(text)
 
 
+class RewriteTests(unittest.TestCase):
+    def test_clean_tags(self):
+        raw = "<think>\n\n</think>\n\nTags: 1girl, nurse, adult woman, nurse, adult woman, night\nextra line"
+        self.assertEqual(saga.clean_tags(raw), "1girl, nurse, adult woman, night")
+
+    def test_looks_like_tags(self):
+        self.assertTrue(saga.looks_like_tags("1girl, solo, long hair, smile, red dress"))
+        self.assertFalse(saga.looks_like_tags("a tired nurse sitting on a bench at night"))
+        self.assertFalse(saga.looks_like_tags("face"))
+
+    def test_rewrite_falls_back_to_original(self):
+        class _Broken:
+            async def run_text(self, graph):
+                raise RuntimeError("comfy down")
+
+        self.assertEqual(asyncio.run(saga.rewrite_prompt(_Broken(), "a woman reading")), "a woman reading")
+
+    def test_rewrite_rejects_minor_tags(self):
+        class _Bad:
+            async def run_text(self, graph):
+                return "1girl, loli"
+
+        self.assertEqual(asyncio.run(saga.rewrite_prompt(_Bad(), "a small woman")), "a small woman")
+
+
 class OptionTests(unittest.TestCase):
     def test_aspect(self):
         self.assertEqual(saga.parse_aspect(None), "landscape")
@@ -50,7 +75,8 @@ class OptionTests(unittest.TestCase):
     def test_still_options(self):
         opts = saga.parse_still_options()
         self.assertEqual(opts, {"aspect": "landscape", "character": None, "outfit": True, "quality": "hd",
-                                "layout": "scene", "background": None})
+                                "layout": "scene", "background": None, "rewrite": True})
+        self.assertFalse(saga.parse_still_options(rewrite="0")["rewrite"])
         opts = saga.parse_still_options(character="Debbie", outfit="0", quality="fast")
         self.assertEqual((opts["character"], opts["outfit"], opts["quality"]), ("debbie", False, "fast"))
         with self.assertRaises(saga.SagaError):
@@ -194,6 +220,24 @@ class GraphTests(unittest.TestCase):
         self.assertEqual((out.mode, out.size), ("RGBA", (301, 517)))
         self.assertEqual(list(out.getchannel("A").getdata()), list(src.getchannel("A").getdata()))
 
+    def test_small_part_is_cropped_and_put_back_in_place(self):
+        from PIL import Image
+
+        src = Image.new("RGBA", (1024, 768), (0, 0, 0, 0))
+        src.paste((210, 160, 140, 255), (691, 172, 786, 314))
+        buf = BytesIO()
+        src.save(buf, format="PNG")
+        png, w16, h16, plan = saga.prepare_part(buf.getvalue())
+        x0, y0, x1, y1 = plan["region"]
+        self.assertTrue(x0 < 691 and y0 < 172 and x1 > 786 and y1 > 314 and x1 - x0 < 200)
+        self.assertEqual(max(w16, h16), saga.PHOTO_BOX)
+
+        out = Image.open(BytesIO(saga.finish_part(png, plan)))
+        self.assertEqual((out.mode, out.size), ("RGBA", (1024, 768)))
+        self.assertEqual(list(out.getchannel("A").getdata()), list(src.getchannel("A").getdata()))
+        r, g, b, _ = out.getpixel((738, 243))
+        self.assertTrue(abs(r - 210) < 6 and abs(g - 160) < 6 and abs(b - 140) < 6, (r, g, b))
+
     def test_part_without_alpha_stays_opaque(self):
         from PIL import Image
 
@@ -228,6 +272,59 @@ class GraphTests(unittest.TestCase):
         self.assertEqual(Image.open(BytesIO(data)).size, (300, 500))
         self.assertEqual((meta["saga"]["kind"], meta["saga"]["transparent"], meta["saga"]["width"]),
                          ("part", True, 300))
+
+    def test_run_still_part_rewrites_and_applies_changes(self):
+        from PIL import Image
+
+        graphs, asked = [], []
+
+        class _Client:
+            async def run_text(self, graph):
+                asked.append(graph["2"]["inputs"]["prompt"])
+                return "<think>\n\n</think>\n\nTags: blue eyes, dark lipstick, blue eyes, smiling"
+
+            async def _upload_image(self, data):
+                return "part.png"
+
+            async def _run_and_fetch(self, graph, prefer, input_name):
+                graphs.append(graph)
+                out = BytesIO()
+                Image.new("RGB", (96, 160), (90, 90, 90)).save(out, format="PNG")
+                return out.getvalue(), "image/png"
+
+        src = BytesIO()
+        Image.new("RGBA", (300, 500), (255, 0, 0, 0)).save(src, format="PNG")
+        _, _, meta = asyncio.run(saga.run_still(
+            _Client(), "", seed=3, image_bytes=src.getvalue(),
+            options={"layout": "part", "part": "face", "strength": "light",
+                     "changes": "make her eyes blue and give her darker lipstick"}))
+        self.assertEqual(len(asked), 1)
+        text = graphs[0]["5"]["inputs"]["text"]
+        self.assertIn(saga.PART_TYPES["face"] + ", blue eyes, dark lipstick, smiling", text)
+        self.assertEqual(graphs[0]["8"]["inputs"]["denoise"], saga.STRENGTHS["medium"])
+        self.assertEqual((meta["saga"]["part"], meta["saga"]["strength"]), ("face", "medium"))
+        self.assertTrue(meta["saga"]["prompt_used"].startswith(saga.PART_TYPES["face"]))
+
+    def test_rewrite_off_keeps_words(self):
+        from PIL import Image
+
+        graphs = []
+
+        class _Client:
+            async def run_text(self, graph):
+                raise AssertionError("rewrite should be off")
+
+            async def _upload_image(self, data):
+                return "p.png"
+
+            async def _run_and_fetch(self, graph, prefer, input_name):
+                graphs.append(graph)
+                out = BytesIO()
+                Image.new("RGB", (64, 64)).save(out, format="PNG")
+                return out.getvalue(), "image/png"
+
+        asyncio.run(saga.run_still(_Client(), "a woman reading in a park", seed=1, options={"rewrite": False}))
+        self.assertTrue(graphs[0]["5"]["inputs"]["text"].endswith("a woman reading in a park"))
 
     def test_cutout_graph(self):
         g = saga.build_still_graph("x", seed=1, width=768, height=1344, cutout=True)

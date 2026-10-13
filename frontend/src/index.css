@@ -2175,6 +2175,64 @@ button.gallery-item {
   margin: 0.5rem 0;
 }
 
+.saga-tabs {
+  margin-bottom: 0.85rem;
+}
+
+.saga-model-prompt {
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.saga-guide {
+  line-height: 1.55;
+}
+
+.saga-guide h3 {
+  margin: 1.4rem 0 0.5rem;
+  font-size: 0.95rem;
+}
+
+.saga-guide p,
+.saga-guide li {
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+.saga-guide b {
+  color: var(--ink);
+}
+
+.saga-guide code {
+  font-size: 0.82rem;
+  color: var(--accent);
+  white-space: normal;
+}
+
+.saga-guide ul {
+  padding-left: 1.1rem;
+}
+
+.saga-guide-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.saga-guide-table th,
+.saga-guide-table td {
+  text-align: left;
+  vertical-align: top;
+  padding: 0.45rem 0.5rem;
+  border-top: 1px solid var(--line);
+}
+
+.saga-guide-table th {
+  font-weight: 600;
+  color: var(--ink);
+  width: 40%;
+}
+
 .saga-library-toggle {
   appearance: none;
   border: 0;

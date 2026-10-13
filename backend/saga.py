@@ -11,9 +11,12 @@ from __future__ import annotations
 
 import copy
 import io
+import logging
 import random
 import re
 from typing import Any, Optional
+
+logger = logging.getLogger(__name__)
 
 ANIMA_UNET = "anima-aesthetic-v1.1.safetensors"
 ANIMA_CLIP = "qwen_3_06b_base.safetensors"
@@ -66,6 +69,17 @@ SPRITE_SUFFIX = ", solo, full body, standing, simple background, white backgroun
 SPRITE_NEGATIVE = NEGATIVE + ", shadow, drop shadow, floor, ground, reflection"
 BACKGROUND_PREFIX = "no humans, scenery, detailed background, "
 PART_SUFFIX = "simple background"
+# What a part layer shows; tells the model how to read a lone cut-out (a bare face crop was drawn as a torso).
+PART_TYPES: dict[str, str] = {
+    "face": "face focus, close-up, portrait, face",
+    "hand": "hand focus, close-up, hands",
+    "body": "body focus, torso, skin",
+    "hair": "hair focus, close-up, hair",
+    "other": "",
+}
+# Margin kept around a part's visible pixels when it is cropped out for redrawing.
+PART_MARGIN = 0.15
+CHANGES_MAX_CHARS = 500
 BACKGROUND_NEGATIVE = NEGATIVE + ", 1girl, 1boy, person, people, humans, character"
 HAND_PROMPT = "detailed hands, five fingers, well-drawn fingers"
 MOTION_PREFIX = "2D cartoon animation in the same art style, "
@@ -73,6 +87,25 @@ MOTION_NEGATIVE = (
     "photorealistic, 3d render, blurry, distorted face, extra limbs, flicker, morphing, "
     "static image, text, watermark"
 )
+
+# Plain English -> Danbooru-style tags, rewritten locally by Qwen3 4B (ComfyUI TextGenerate, ~1 s).
+REWRITE_MODEL = "qwen_3_4b.safetensors"
+REWRITE_MAX_TAGS = 30
+REWRITE_INSTRUCTIONS = """Convert the request into comma-separated Danbooru-style tags for an anime image model.
+Rules:
+- Output only the tags on one line. No sentences, no explanations.
+- Include ONLY what the request states or clearly implies. Never add hair colour, eye colour, clothing, places or other details that were not asked for.
+- Turn each requested detail into the closest common Danbooru tag (e.g. "in her 40s" -> mature female; "nurse" -> nurse; "darker lipstick" -> dark lipstick).
+- People are always adults. Never use child, teen, loli, school or young-looking tags.
+- Use each tag once. At most 25 tags.
+
+Examples:
+Request: a woman in her 30s with short red hair reading a book in a park
+Tags: 1girl, solo, mature female, short hair, red hair, reading, holding book, park, outdoors
+Request: make her eyes green and add freckles
+Tags: green eyes, freckles
+Request: face
+Tags: face focus, close-up, portrait"""
 
 # Canon adult cast only (parents, teachers, staff). look = identity tags, outfit = their usual clothes.
 CHARACTERS: dict[str, dict[str, str]] = {
@@ -192,8 +225,12 @@ def parse_still_options(
     background: Optional[str] = None,
     photo: bool = False,
     strength: Optional[str] = None,
+    part: Optional[str] = None,
+    changes: Optional[str] = None,
+    rewrite: Optional[str] = None,
 ) -> dict[str, Any]:
-    """photo=True: scene restyles the uploaded photo; sprite uses it as the background."""
+    """photo=True: scene restyles the uploaded photo, sprite uses it as the background, part redraws one layer.
+    changes: plain-English edits to the uploaded image. rewrite: turn plain English into model tags (default on)."""
     char = (character or "").strip().lower() or None
     if char and char not in CHARACTERS:
         raise SagaError(f"Unknown character '{character}'")
@@ -214,9 +251,16 @@ def parse_still_options(
         "layout": lay,
         "background": bg if lay == "sprite" else None,
     }
+    opts["rewrite"] = _flag(rewrite, True)
     if photo:
         opts["photo"] = True
         opts["strength"] = _pick(strength, STRENGTHS, "light" if lay == "part" else "medium", "strength")
+        edit = (changes or "").strip()[:CHANGES_MAX_CHARS] or None
+        if edit:
+            _check_adult(edit)
+        opts["changes"] = edit
+    if lay == "part":
+        opts["part"] = _pick(part, PART_TYPES, "other", "part type")
     return opts
 
 
@@ -265,8 +309,16 @@ def prepare_part(image_bytes: bytes, box: int = PHOTO_BOX) -> tuple[bytes, int, 
     original canvas and transparency."""
     from PIL import Image, ImageOps
 
-    rgba = ImageOps.exif_transpose(Image.open(io.BytesIO(image_bytes))).convert("RGBA")
-    alpha = rgba.getchannel("A")
+    full = ImageOps.exif_transpose(Image.open(io.BytesIO(image_bytes))).convert("RGBA")
+    alpha = full.getchannel("A")
+    region = (0, 0, full.width, full.height)
+    visible = alpha.point(lambda a: 255 if a > 8 else 0).getbbox()
+    if visible:
+        mx = round((visible[2] - visible[0]) * PART_MARGIN) + 4
+        my = round((visible[3] - visible[1]) * PART_MARGIN) + 4
+        region = (max(0, visible[0] - mx), max(0, visible[1] - my),
+                  min(full.width, visible[2] + mx), min(full.height, visible[3] + my))
+    rgba = full.crop(region)
     scale = box / max(rgba.size)
     w, h = max(1, round(rgba.width * scale)), max(1, round(rgba.height * scale))
     w16, h16 = max(16, -(-w // 16) * 16), max(16, -(-h // 16) * 16)
@@ -275,20 +327,26 @@ def prepare_part(image_bytes: bytes, box: int = PHOTO_BOX) -> tuple[bytes, int, 
     canvas.paste(rgba.resize((w, h), Image.Resampling.LANCZOS), (left, top))
     buf = io.BytesIO()
     _bleed(canvas).save(buf, format="PNG")
-    plan = {"size": rgba.size, "canvas": (w16, h16), "inner": (left, top, w, h),
+    plan = {"size": full.size, "region": region, "canvas": (w16, h16), "inner": (left, top, w, h),
             "alpha": alpha if alpha.getextrema()[0] < 255 else None}
     return buf.getvalue(), w16, h16, plan
 
 
 def finish_part(data: bytes, plan: dict[str, Any]) -> bytes:
-    """Undo prepare_part: drop the padding, return to the original size, re-apply the original alpha."""
+    """Undo prepare_part: drop the padding, shrink back into the cropped region of the original canvas,
+    re-apply the original alpha."""
     from PIL import Image
 
     out = Image.open(io.BytesIO(data)).convert("RGB")
     sx, sy = out.width / plan["canvas"][0], out.height / plan["canvas"][1]
     left, top, w, h = plan["inner"]
     out = out.crop((round(left * sx), round(top * sy), round((left + w) * sx), round((top + h) * sy)))
-    out = out.resize(plan["size"], Image.Resampling.LANCZOS)
+    x0, y0, x1, y1 = plan["region"]
+    out = out.resize((x1 - x0, y1 - y0), Image.Resampling.LANCZOS)
+    if (x0, y0, x1, y1) != (0, 0, *plan["size"]):
+        canvas = Image.new("RGB", plan["size"], (0, 0, 0))
+        canvas.paste(out, (x0, y0))
+        out = canvas
     if plan["alpha"] is not None:
         out.putalpha(plan["alpha"])
     buf = io.BytesIO()
@@ -316,6 +374,7 @@ def public_config(installed: Optional[set[str]]) -> dict[str, Any]:
         "aspects": list(ASPECTS),
         "qualities": list(QUALITIES),
         "layouts": list(LAYOUTS),
+        "part_types": list(PART_TYPES),
         "video_seconds": list(VIDEO_SECONDS),
         "video_qualities": list(VIDEO_QUALITIES),
         "hd_video_max_seconds": HD_VIDEO_MAX_SECONDS,
@@ -328,6 +387,50 @@ def character_prompt(prompt: str, character: Optional[str], outfit: bool) -> str
     c = CHARACTERS[character]
     parts = [c["look"]] + ([c["outfit"]] if outfit else []) + [prompt]
     return ", ".join(p for p in parts if p)
+
+
+def looks_like_tags(text: str) -> bool:
+    """Already written as model tags (e.g. '1girl, long hair, smile'), so leave it alone."""
+    pieces = [p.strip() for p in text.split(",") if p.strip()]
+    return len(pieces) >= 4 and sum(len(p.split()) for p in pieces) / len(pieces) <= 3
+
+
+def build_rewrite_graph(text: str) -> dict[str, Any]:
+    prompt = f"{REWRITE_INSTRUCTIONS}\n\nRequest: {text}\nTags: /no_think"
+    return {
+        "1": {"class_type": "CLIPLoader", "inputs": {"clip_name": REWRITE_MODEL, "type": "lumina2", "device": "default"}},
+        "2": {"class_type": "TextGenerate", "inputs": {"clip": ["1", 0], "prompt": prompt, "max_length": 160,
+                                                         "sampling_mode": "off", "use_default_template": True,
+                                                         "thinking": False}},
+        "3": {"class_type": "PreviewAny", "inputs": {"source": ["2", 0]}},
+    }
+
+
+def clean_tags(raw: str) -> str:
+    """Model output -> one deduplicated tag line (drops the empty think block, 'Tags:' and repeat loops)."""
+    text = re.sub(r"<think>.*?</think>", "", raw or "", flags=re.S).strip()
+    text = text.splitlines()[0] if text else ""
+    text = re.sub(r"^\s*tags\s*:\s*", "", text, flags=re.I)
+    seen, tags = set(), []
+    for tag in (t.strip(" .\"'") for t in text.split(",")):
+        if tag and tag.lower() not in seen:
+            seen.add(tag.lower())
+            tags.append(tag)
+    return ", ".join(tags[:REWRITE_MAX_TAGS])
+
+
+async def rewrite_prompt(client: Any, text: str) -> str:
+    """Plain English -> model tags. Falls back to the user's own words on any failure."""
+    text = (text or "").strip()
+    if not text or looks_like_tags(text):
+        return text
+    try:
+        tags = clean_tags(await client.run_text(build_rewrite_graph(text)))
+        _check_adult(tags)
+    except Exception as exc:
+        logger.warning("Saga prompt rewrite failed, using the original: %s", exc)
+        return text
+    return tags or text
 
 
 def _snap(v: float, m: int = 16) -> int:
@@ -457,7 +560,8 @@ async def run_still(
     client: Any, prompt: str, *, seed: Optional[int], aspect: Optional[str] = None,
     options: Optional[dict[str, Any]] = None, image_bytes: Optional[bytes] = None,
 ) -> tuple[bytes, str, dict]:
-    """Text-to-image, or with image_bytes: restyle the photo (scene) / use it as the background (sprite)."""
+    """Text-to-image, or with image_bytes: restyle the photo (scene), use it as the background (sprite)
+    or redraw one character layer (part). Plain English is rewritten into model tags unless rewrite is off."""
     text = check_prompt(prompt, allow_empty=image_bytes is not None)
     opts = dict(options or {})
     opts.setdefault("aspect", aspect)
@@ -465,7 +569,8 @@ async def run_still(
         aspect=opts.get("aspect"), character=opts.get("character"),
         outfit=None if opts.get("outfit", True) else "0", quality=opts.get("quality"),
         layout=opts.get("layout"), background=opts.get("background"),
-        photo=image_bytes is not None, strength=opts.get("strength"),
+        photo=image_bytes is not None, strength=opts.get("strength"), part=opts.get("part"),
+        changes=opts.get("changes"), rewrite=None if opts.get("rewrite", True) else "0",
     )
     seed = seed if seed is not None else random.randint(0, 2**32 - 1)
     hd = opts["quality"] == "hd"
@@ -476,35 +581,50 @@ async def run_still(
     elif image_bytes is not None:
         photo, pw, ph = prepare_photo(image_bytes)
 
+    async def adapt(words: Optional[str]) -> str:
+        return await rewrite_prompt(client, words or "") if opts["rewrite"] else (words or "")
+
+    desc = await adapt(text)
+    edit = await adapt(opts.get("changes")) if photo else ""
+    strength = opts.get("strength")
+    if edit and strength == "light":
+        strength = "medium"
+
     def denoise_for(described: bool) -> float:
-        return (STRENGTHS if described else BLANK_STRENGTHS)[opts["strength"]] if photo else 1.0
+        return (STRENGTHS if described else BLANK_STRENGTHS)[strength] if photo else 1.0
+
+    def join(*parts: str) -> str:
+        return ", ".join(p for p in parts if p)
 
     if plan:
-        subject = ", ".join(p for p in (character_prompt(text, opts["character"], opts["outfit"]), PART_SUFFIX) if p)
+        part_tags = PART_TYPES[opts["part"]]
+        subject = join(part_tags, character_prompt(desc, opts["character"], opts["outfit"]), edit, PART_SUFFIX)
         out = await _render(client, lambda n: build_still_graph(
             subject, seed=seed, width=pw, height=ph, character=opts["character"], hd=hd,
-            source_image=n, denoise=denoise_for(bool(text))), photo)
+            source_image=n, denoise=denoise_for(bool(part_tags or desc or edit))), photo)
         data, ctype = finish_part(out, plan), "image/png"
     elif opts["layout"] == "sprite":
         sw, sh = ASPECTS["portrait"]
-        subject = character_prompt(text or "standing, smiling, looking at viewer", opts["character"], opts["outfit"])
+        subject = character_prompt(desc or "standing, smiling, looking at viewer", opts["character"], opts["outfit"])
+        background = await adapt(opts["background"])
         sprite = await _render(client, lambda _n: build_still_graph(
             subject + SPRITE_SUFFIX, seed=seed, width=sw, height=sh, character=opts["character"], hd=hd,
             negative=SPRITE_NEGATIVE, cutout=True), None)
         if photo:
             width, height = pw, ph
         back = await _render(client, lambda n: build_still_graph(
-            BACKGROUND_PREFIX + (opts["background"] or ""), seed=seed + 7, width=width, height=height,
+            BACKGROUND_PREFIX + background, seed=seed + 7, width=width, height=height,
             hd=hd, negative=BACKGROUND_NEGATIVE, detail=False, source_image=n,
-            denoise=denoise_for(bool(opts["background"]))), photo)
+            denoise=denoise_for(bool(background))), photo)
         data, ctype = compose_sprite(back, sprite), "image/png"
+        subject = join(subject, f"background: {background}" if background else "")
     else:
         if photo:
             width, height = pw, ph
-        subject = character_prompt(text, opts["character"], opts["outfit"])
+        subject = character_prompt(join(desc, edit), opts["character"], opts["outfit"])
         data = await _render(client, lambda n: build_still_graph(
             subject, seed=seed, width=width, height=height, character=opts["character"], hd=hd,
-            source_image=n, denoise=denoise_for(bool(text))), photo)
+            source_image=n, denoise=denoise_for(bool(desc or edit))), photo)
         ctype = "image/png"
     if plan:
         width, height = plan["size"]
@@ -512,11 +632,12 @@ async def run_still(
         width, height = _snap(width * HD_SCALE), _snap(height * HD_SCALE)
     label = f"{ANIMA_UNET}+{STYLE_LORA}" + (f"+{char_lora(opts['character'])}" if opts["character"] else "")
     meta = {"kind": "still", "aspect": opts["aspect"], "width": width, "height": height,
-            "character": opts["character"], "quality": opts["quality"], "layout": opts["layout"]}
+            "character": opts["character"], "quality": opts["quality"], "layout": opts["layout"],
+            "prompt_used": subject}
     if photo:
-        meta.update(kind="photo", aspect="photo", strength=opts["strength"])
+        meta.update(kind="photo", aspect="photo", strength=strength, changes=opts.get("changes"))
     if plan:
-        meta.update(kind="part", transparent=plan["alpha"] is not None)
+        meta.update(kind="part", part=opts["part"], transparent=plan["alpha"] is not None)
     return data, ctype, {"model_label": label, "seed_used": seed, "saga": meta}
 
 

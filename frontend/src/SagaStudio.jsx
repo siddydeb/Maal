@@ -14,8 +14,10 @@ import {
   wakeApi,
 } from "./api";
 import { clearSession } from "./auth";
+import SagaGuide from "./SagaGuide.jsx";
 
 const PROMPT_MAX = 800;
+const CHANGES_MAX = 500;
 const ASPECTS = [
   ["landscape", "Landscape"],
   ["portrait", "Portrait"],
@@ -26,6 +28,18 @@ const QUALITIES = [
   ["fast", "Fast"],
 ];
 const LIBRARY_OPEN_KEY = "saga.libraryOpen";
+const REWRITE_KEY = "saga.rewrite";
+const TABS = [
+  ["studio", "Studio"],
+  ["guide", "Prompt guide"],
+];
+const PART_TYPES = [
+  ["face", "Face"],
+  ["hand", "Hand"],
+  ["body", "Body"],
+  ["hair", "Hair"],
+  ["other", "Other"],
+];
 const LAYOUTS = [
   ["scene", "Scene"],
   ["sprite", "Game sprite"],
@@ -100,6 +114,10 @@ export default function SagaStudio() {
   const [photo, setPhoto] = useState(null);
   const [photoUrl, setPhotoUrl] = useState("");
   const [strength, setStrength] = useState("medium");
+  const [partType, setPartType] = useState("face");
+  const [changes, setChanges] = useState("");
+  const [rewrite, setRewrite] = useState(() => localStorage.getItem(REWRITE_KEY) !== "0");
+  const [tab, setTab] = useState("studio");
   const pollRef = useRef(null);
   const photoInput = useRef(null);
   const sprite = layout === "sprite";
@@ -211,6 +229,11 @@ export default function SagaStudio() {
 
   const canGenerate = part ? Boolean(photo) : Boolean(prompt.trim()) || (photo && !sprite);
 
+  function onToggleRewrite(on) {
+    setRewrite(on);
+    localStorage.setItem(REWRITE_KEY, on ? "1" : "0");
+  }
+
   function onPickLayout(next) {
     setLayout(next);
     if (next === "part") setStrength("light");
@@ -232,8 +255,12 @@ export default function SagaStudio() {
       layout,
       background: sprite && background.trim() ? background.trim() : undefined,
       strength: photo ? strength : undefined,
+      part: part ? partType : undefined,
+      changes: photo && !sprite && changes.trim() ? changes.trim() : undefined,
+      rewrite,
     };
-    const base = text || (part ? "Part in Saga style" : "Photo in Saga style");
+    const base =
+      text || changes.trim() || (part ? `${partType} part in Saga style` : "Photo in Saga style");
     const label = picked ? `${picked.label}: ${base}` : base;
     await enqueue({ mode: "saga", prompt: text, saga, file: photo || undefined }, label);
   }
@@ -304,245 +331,291 @@ export default function SagaStudio() {
           </div>
         </header>
 
-        <section className="panel view-panel">
-          <form className="form" onSubmit={onGenerate}>
-            {characters.length > 0 && (
-              <div className="section">
-                <label className="t2i-field">
-                  <span>Character</span>
-                  <select value={character} onChange={(e) => setCharacter(e.target.value)}>
-                    <option value="">Original (describe her)</option>
-                    {characters.map((c) => (
-                      <option key={c.id} value={c.id}>
-                        {c.label}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                {picked && (
-                  <label className="train-auto">
-                    <input type="checkbox" checked={outfit} onChange={(e) => setOutfit(e.target.checked)} />
-                    <span>Her usual outfit ({picked.outfit})</span>
-                  </label>
+        <div className="saga-tabs">
+          <Segment label="Page" options={TABS} value={tab} onChange={setTab} />
+        </div>
+
+        {tab === "guide" ? (
+          <SagaGuide />
+        ) : (
+          <>
+            <section className="panel view-panel">
+              <form className="form" onSubmit={onGenerate}>
+                {characters.length > 0 && (
+                  <div className="section">
+                    <label className="t2i-field">
+                      <span>Character</span>
+                      <select value={character} onChange={(e) => setCharacter(e.target.value)}>
+                        <option value="">Original (describe her)</option>
+                        {characters.map((c) => (
+                          <option key={c.id} value={c.id}>
+                            {c.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    {picked && (
+                      <label className="train-auto">
+                        <input type="checkbox" checked={outfit} onChange={(e) => setOutfit(e.target.checked)} />
+                        <span>Her usual outfit ({picked.outfit})</span>
+                      </label>
+                    )}
+                  </div>
                 )}
-              </div>
-            )}
 
-            <div className="section">
-              <div className="section-head">
-                <h2 className="section-title">
-                  {part ? "Part to restyle (face, hand, body…)" : "Start from a photo (optional)"}
-                </h2>
-              </div>
-              {part && !photo && (
-                <p className="setting-hint">
-                  Transparent PNGs come back transparent with the exact same outline, and the result has the same
-                  pixel size as your file, so the layers line up.
-                </p>
-              )}
-              <input ref={photoInput} type="file" accept="image/*" hidden onChange={onPickPhoto} />
-              {photo ? (
-                <div className="saga-photo">
-                  <img className="saga-photo-preview saga-checker" src={photoUrl} alt="" />
-                  <div className="saga-photo-side">
-                    <p className="setting-hint">
-                      {part
-                        ? "This part gets redrawn in the game style, same size and outline as your file."
-                        : sprite
-                          ? "This photo becomes the game background she stands in."
-                          : "This photo gets redrawn in the Summertime Saga style."}
-                    </p>
-                    <Segment label="Strength" options={STRENGTHS} value={strength} onChange={setStrength} />
-                    <p className="setting-hint">
-                      {part
-                        ? "Light keeps the shape closest (fingers, pose) · Strong changes more. Saying what the part is helps a lot."
-                        : "Light keeps more of the photo · Strong looks more like the game. A short description below gives a much stronger game look."}
-                    </p>
-                    <button type="button" className="ghost" onClick={() => setPhoto(null)}>
-                      {part ? "remove image" : "remove photo"}
-                    </button>
+                <div className="section">
+                  <div className="section-head">
+                    <h2 className="section-title">
+                      {part ? "Part to restyle (face, hand, body…)" : "Start from a photo (optional)"}
+                    </h2>
                   </div>
-                </div>
-              ) : (
-                <button type="button" className="ghost" onClick={() => photoInput.current?.click()}>
-                  {part ? "Add part image" : "Add photo"}
-                </button>
-              )}
-            </div>
-
-            <div className="section">
-              <div className="section-head">
-                <h2 className="section-title">
-                  {part
-                    ? "What is this part? (optional)"
-                    : photo && !sprite
-                    ? "Describe the photo (optional)"
-                    : picked
-                      ? `What is ${picked.label} doing?`
-                      : "Describe the scene"}
-                </h2>
-                <span className="char-count">
-                  {prompt.length}/{PROMPT_MAX}
-                </span>
-              </div>
-              <textarea
-                className="prompt-area"
-                rows={4}
-                maxLength={PROMPT_MAX}
-                placeholder={
-                  part
-                    ? "e.g. left hand, open palm, red nail polish · or: woman's face, smiling, brown eyes, long dark hair"
-                    : photo && !sprite
-                    ? "Optional but recommended: say what's in it, e.g. woman with long dark hair laughing, red turtleneck, city street…"
-                    : picked
-                      ? "e.g. standing in the kitchen holding a coffee mug, warm smile, morning light…"
-                      : "e.g. a 35 year old woman with short red hair in a green sweater, reading on a park bench in autumn, smiling at the viewer…"
-                }
-                value={prompt}
-                onChange={(e) => setPrompt(e.target.value.slice(0, PROMPT_MAX))}
-              />
-              <div className="saga-ideas" hidden={part}>
-                {ideas.map((idea) => (
-                  <button key={idea} type="button" className="ghost saga-idea" onClick={() => setPrompt(idea)}>
-                    {idea.split(",")[0]}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {sprite && (
-              <div className="section">
-                <h2 className="section-title">
-                  {photo ? "Background notes (optional)" : "Background (where she stands)"}
-                </h2>
-                <input
-                  className="saga-bg-input"
-                  type="text"
-                  maxLength={200}
-                  placeholder="e.g. suburban kitchen, morning light"
-                  value={background}
-                  onChange={(e) => setBackground(e.target.value)}
-                />
-                <div className="saga-ideas">
-                  {BACKGROUND_IDEAS.map((idea) => (
-                    <button key={idea} type="button" className="ghost saga-idea" onClick={() => setBackground(idea)}>
-                      {idea}
+                  {part && (
+                    <div className="setting-row">
+                      <div className="setting-label">
+                        <span>This part is a</span>
+                        <span className="setting-hint">Tells the model what it is looking at</span>
+                      </div>
+                      <Segment label="Part type" options={PART_TYPES} value={partType} onChange={setPartType} />
+                    </div>
+                  )}
+                  {part && !photo && (
+                    <p className="setting-hint">
+                      Transparent PNGs come back transparent with the exact same outline, and the result has the same
+                      pixel size as your file, so the layers line up.
+                    </p>
+                  )}
+                  <input ref={photoInput} type="file" accept="image/*" hidden onChange={onPickPhoto} />
+                  {photo ? (
+                    <div className="saga-photo">
+                      <img className="saga-photo-preview saga-checker" src={photoUrl} alt="" />
+                      <div className="saga-photo-side">
+                        <p className="setting-hint">
+                          {part
+                            ? "This part gets redrawn in the game style, same size and outline as your file."
+                            : sprite
+                              ? "This photo becomes the game background she stands in."
+                              : "This photo gets redrawn in the Summertime Saga style."}
+                        </p>
+                        <Segment label="Strength" options={STRENGTHS} value={strength} onChange={setStrength} />
+                        <p className="setting-hint">
+                          {part
+                            ? "Light keeps the shape closest (fingers, pose) · Strong changes more. Saying what the part is helps a lot."
+                            : "Light keeps more of the photo · Strong looks more like the game. A short description below gives a much stronger game look."}
+                        </p>
+                        <button type="button" className="ghost" onClick={() => setPhoto(null)}>
+                          {part ? "remove image" : "remove photo"}
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <button type="button" className="ghost" onClick={() => photoInput.current?.click()}>
+                      {part ? "Add part image" : "Add photo"}
                     </button>
-                  ))}
+                  )}
                 </div>
-              </div>
-            )}
 
-            <div className="section">
-              {!photo && (
-                <div className="setting-row">
-                  <div className="setting-label">
-                    <span>Shape</span>
-                    <span className="setting-hint">Landscape matches the game screen</span>
+                <div className="section">
+                  <div className="section-head">
+                    <h2 className="section-title">
+                      {part
+                        ? "What is this part? (optional)"
+                        : photo && !sprite
+                        ? "Describe the photo (optional)"
+                        : picked
+                          ? `What is ${picked.label} doing?`
+                          : "Describe the scene"}
+                    </h2>
+                    <span className="char-count">
+                      {prompt.length}/{PROMPT_MAX}
+                    </span>
                   </div>
-                  <Segment label="Shape" options={ASPECTS} value={aspect} onChange={setAspect} />
-                </div>
-              )}
-              <div className="setting-row">
-                <div className="setting-label">
-                  <span>Quality</span>
-                  <span className="setting-hint">HD: sharper, bigger, faces and hands cleaned up</span>
-                </div>
-                <Segment label="Quality" options={QUALITIES} value={quality} onChange={setQuality} />
-              </div>
-              <div className="setting-row">
-                <div className="setting-label">
-                  <span>Layout</span>
-                  <span className="setting-hint">
-                    Game sprite: cut-out character on a game background · Part: restyle one piece (face, hand…)
-                  </span>
-                </div>
-                <Segment label="Layout" options={LAYOUTS} value={layout} onChange={onPickLayout} />
-              </div>
-            </div>
-
-            <button type="submit" className="go" disabled={busy || !canGenerate}>
-              <span className="go-main">
-                <span>
-                  {busy ? "Queuing…" : part ? "Restyle part" : photo && !sprite ? "Restyle photo" : "Generate image"}
-                </span>
-                {busy && <span className="spinner" />}
-              </span>
-              <span className="go-sub">
-                {quality === "hd" ? "about 1–2 minutes" : "about 30 seconds"} · tap any image to animate it
-              </span>
-            </button>
-            {error && <p className="status error">{error}</p>}
-          </form>
-
-          {jobs.length > 0 && (
-            <ul className="saga-jobs">
-              {jobs.map((j) => (
-                <li key={j.id} className={`saga-job${j.status === "failed" ? " failed" : ""}`}>
-                  <span className="saga-job-kind">{j.mode === "saga_vid" ? "Video" : "Image"}</span>
-                  <span className="saga-job-text">
-                    {j.status === "failed" ? j.error || "Failed" : j.prompt}
-                  </span>
-                  <span className="saga-job-status">
-                    {j.status === "running" ? (
-                      <span className="spinner" />
-                    ) : j.status === "queued" ? (
-                      "queued"
-                    ) : null}
-                  </span>
-                  <button
-                    type="button"
-                    className="ghost"
-                    onClick={() =>
-                      j.status === "failed" ? setJobs((p) => p.filter((x) => x.id !== j.id)) : onCancel(j)
+                  <textarea
+                    className="prompt-area"
+                    rows={4}
+                    maxLength={PROMPT_MAX}
+                    placeholder={
+                      part
+                        ? "e.g. left hand, open palm, red nail polish · or: woman's face, smiling, brown eyes, long dark hair"
+                        : photo && !sprite
+                        ? "Optional but recommended: say what's in it, e.g. woman with long dark hair laughing, red turtleneck, city street…"
+                        : picked
+                          ? "e.g. standing in the kitchen holding a coffee mug, warm smile, morning light…"
+                          : "e.g. a 35 year old woman with short red hair in a green sweater, reading on a park bench in autumn, smiling at the viewer…"
                     }
-                  >
-                    {j.status === "failed" ? "dismiss" : "cancel"}
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
-        </section>
+                    value={prompt}
+                    onChange={(e) => setPrompt(e.target.value.slice(0, PROMPT_MAX))}
+                  />
+                  <div className="saga-ideas" hidden={part}>
+                    {ideas.map((idea) => (
+                      <button key={idea} type="button" className="ghost saga-idea" onClick={() => setPrompt(idea)}>
+                        {idea.split(",")[0]}
+                      </button>
+                    ))}
+                  </div>
+                  <label className="train-auto">
+                    <input type="checkbox" checked={rewrite} onChange={(e) => onToggleRewrite(e.target.checked)} />
+                    <span>Turn my plain English into model tags (see the Guide tab)</span>
+                  </label>
+                </div>
 
-        <section className="panel view-panel">
-          <button
-            type="button"
-            className="saga-library-toggle"
-            aria-expanded={libraryOpen}
-            onClick={toggleLibrary}
-          >
-            <span className="section-title">Library{libraryTotal ? ` (${libraryTotal})` : ""}</span>
-            <span className="saga-library-toggle-hint">{libraryOpen ? "Hide ▴" : "Show ▾"}</span>
-          </button>
-          {libraryOpen && (
-            <>
-              <ul className="gallery">
-                {!library.length && <li className="empty gallery-empty">Nothing here yet.</li>}
-                {library.map((item) => (
-                  <li key={item.id} className="gallery-item">
-                    <button type="button" className="gallery-cell" onClick={() => setViewer(item)}>
-                      {isVideo(item) ? (
-                        <span className="gallery-thumb gallery-thumb-video">
-                          <img src={thumbUrl(item)} alt="" loading="lazy" decoding="async" />
-                          <span className="gallery-play" aria-hidden="true">▶</span>
-                        </span>
-                      ) : (
-                        <img className="gallery-thumb" src={thumbUrl(item)} alt="" loading="lazy" decoding="async" />
-                      )}
-                      <span className="gallery-kind">{item.kind}</span>
-                    </button>
-                  </li>
-                ))}
-              </ul>
-              {library.length < libraryTotal && (
-                <button type="button" className="ghost saga-more" onClick={loadMore}>
-                  Load more
+                {photo && !sprite && (
+                  <div className="section">
+                    <div className="section-head">
+                      <h2 className="section-title">Changes (optional)</h2>
+                      <span className="char-count">
+                        {changes.length}/{CHANGES_MAX}
+                      </span>
+                    </div>
+                    <textarea
+                      className="prompt-area"
+                      rows={2}
+                      maxLength={CHANGES_MAX}
+                      placeholder="What to change, e.g. make her eyes green, add freckles, darker red lipstick, bigger smile"
+                      value={changes}
+                      onChange={(e) => setChanges(e.target.value.slice(0, CHANGES_MAX))}
+                    />
+                    <p className="setting-hint">
+                      Changes need room to redraw, so Light is raised to Medium when you ask for changes. Use Strong
+                      for big changes (different hair, new outfit).
+                    </p>
+                  </div>
+                )}
+
+                {sprite && (
+                  <div className="section">
+                    <h2 className="section-title">
+                      {photo ? "Background notes (optional)" : "Background (where she stands)"}
+                    </h2>
+                    <input
+                      className="saga-bg-input"
+                      type="text"
+                      maxLength={200}
+                      placeholder="e.g. suburban kitchen, morning light"
+                      value={background}
+                      onChange={(e) => setBackground(e.target.value)}
+                    />
+                    <div className="saga-ideas">
+                      {BACKGROUND_IDEAS.map((idea) => (
+                        <button key={idea} type="button" className="ghost saga-idea" onClick={() => setBackground(idea)}>
+                          {idea}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                <div className="section">
+                  {!photo && (
+                    <div className="setting-row">
+                      <div className="setting-label">
+                        <span>Shape</span>
+                        <span className="setting-hint">Landscape matches the game screen</span>
+                      </div>
+                      <Segment label="Shape" options={ASPECTS} value={aspect} onChange={setAspect} />
+                    </div>
+                  )}
+                  <div className="setting-row">
+                    <div className="setting-label">
+                      <span>Quality</span>
+                      <span className="setting-hint">HD: sharper, bigger, faces and hands cleaned up</span>
+                    </div>
+                    <Segment label="Quality" options={QUALITIES} value={quality} onChange={setQuality} />
+                  </div>
+                  <div className="setting-row">
+                    <div className="setting-label">
+                      <span>Layout</span>
+                      <span className="setting-hint">
+                        Game sprite: cut-out character on a game background · Part: restyle one piece (face, hand…)
+                      </span>
+                    </div>
+                    <Segment label="Layout" options={LAYOUTS} value={layout} onChange={onPickLayout} />
+                  </div>
+                </div>
+
+                <button type="submit" className="go" disabled={busy || !canGenerate}>
+                  <span className="go-main">
+                    <span>
+                      {busy ? "Queuing…" : part ? "Restyle part" : photo && !sprite ? "Restyle photo" : "Generate image"}
+                    </span>
+                    {busy && <span className="spinner" />}
+                  </span>
+                  <span className="go-sub">
+                    {quality === "hd" ? "about 1–2 minutes" : "about 30 seconds"} · tap any image to animate it
+                  </span>
                 </button>
+                {error && <p className="status error">{error}</p>}
+              </form>
+
+              {jobs.length > 0 && (
+                <ul className="saga-jobs">
+                  {jobs.map((j) => (
+                    <li key={j.id} className={`saga-job${j.status === "failed" ? " failed" : ""}`}>
+                      <span className="saga-job-kind">{j.mode === "saga_vid" ? "Video" : "Image"}</span>
+                      <span className="saga-job-text">
+                        {j.status === "failed" ? j.error || "Failed" : j.prompt}
+                      </span>
+                      <span className="saga-job-status">
+                        {j.status === "running" ? (
+                          <span className="spinner" />
+                        ) : j.status === "queued" ? (
+                          "queued"
+                        ) : null}
+                      </span>
+                      <button
+                        type="button"
+                        className="ghost"
+                        onClick={() =>
+                          j.status === "failed" ? setJobs((p) => p.filter((x) => x.id !== j.id)) : onCancel(j)
+                        }
+                      >
+                        {j.status === "failed" ? "dismiss" : "cancel"}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
               )}
-            </>
-          )}
-        </section>
+            </section>
+
+            <section className="panel view-panel">
+              <button
+                type="button"
+                className="saga-library-toggle"
+                aria-expanded={libraryOpen}
+                onClick={toggleLibrary}
+              >
+                <span className="section-title">Library{libraryTotal ? ` (${libraryTotal})` : ""}</span>
+                <span className="saga-library-toggle-hint">{libraryOpen ? "Hide ▴" : "Show ▾"}</span>
+              </button>
+              {libraryOpen && (
+                <>
+                  <ul className="gallery">
+                    {!library.length && <li className="empty gallery-empty">Nothing here yet.</li>}
+                    {library.map((item) => (
+                      <li key={item.id} className="gallery-item">
+                        <button type="button" className="gallery-cell" onClick={() => setViewer(item)}>
+                          {isVideo(item) ? (
+                            <span className="gallery-thumb gallery-thumb-video">
+                              <img src={thumbUrl(item)} alt="" loading="lazy" decoding="async" />
+                              <span className="gallery-play" aria-hidden="true">▶</span>
+                            </span>
+                          ) : (
+                            <img className="gallery-thumb" src={thumbUrl(item)} alt="" loading="lazy" decoding="async" />
+                          )}
+                          <span className="gallery-kind">{item.kind}</span>
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                  {library.length < libraryTotal && (
+                    <button type="button" className="ghost saga-more" onClick={loadMore}>
+                      Load more
+                    </button>
+                  )}
+                </>
+              )}
+            </section>
+          </>
+        )}
       </main>
 
       {viewer && (
@@ -574,6 +647,12 @@ export default function SagaStudio() {
               )}
             </div>
             <p className="lightbox-caption">{viewer.prompt || "—"}</p>
+            {viewer.meta?.saga?.changes && (
+              <p className="lightbox-caption saga-model-prompt">Changes: {viewer.meta.saga.changes}</p>
+            )}
+            {viewer.meta?.saga?.prompt_used && (
+              <p className="lightbox-caption saga-model-prompt">Model read: {viewer.meta.saga.prompt_used}</p>
+            )}
             {!isVideo(viewer) && (
               <div className="saga-animate">
                 <textarea

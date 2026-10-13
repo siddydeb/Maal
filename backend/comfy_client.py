@@ -672,6 +672,22 @@ class ComfyClient:
                     )
         return found
 
+    async def run_text(self, workflow: dict[str, Any], *, wait_timeout: float = 120.0) -> str:
+        """Run a graph whose result is text shown by a PreviewAny node; returns that text."""
+        await self.ensure_root()
+        client_id = uuid.uuid4().hex
+        prompt_id = await self._queue(workflow, client_id)
+        try:
+            await self._wait_ws(client_id, prompt_id, timeout=wait_timeout)
+            outputs = (await self._history(prompt_id)).get("outputs") or {}
+        finally:
+            await self._delete_history(prompt_id)
+        for node_out in outputs.values():
+            text = node_out.get("text")
+            if text:
+                return text[0] if isinstance(text, list) else str(text)
+        raise ComfyUIError("No text in ComfyUI outputs")
+
     async def _run_and_fetch(
         self,
         workflow: dict[str, Any],

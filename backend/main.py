@@ -588,6 +588,9 @@ async def start_job(
     layout: Optional[str] = Form(None),
     background: Optional[str] = Form(None),
     strength: Optional[str] = Form(None),
+    part: Optional[str] = Form(None),
+    changes: Optional[str] = Form(None),
+    rewrite: Optional[str] = Form(None),
     owner: str = Depends(require_owner),
 ):
     """
@@ -604,9 +607,11 @@ async def start_job(
     place_box: "x0,y0,x1,y1" (fractions) where she goes in the background; for crowded photos.
     mode=saga / saga_vid belong only to the Saga studio owner (Summertime Saga style):
     saga takes aspect, character, outfit ("0" drops her usual clothes), quality ("fast" | "hd"),
-    layout ("scene" | "sprite") and background (sprite backdrop). An image sent with saga is a photo:
-    scene restyles it (prompt optional), sprite uses it as the backdrop; strength "light" | "medium" |
-    "strong". saga_vid animates the uploaded still for video_seconds (3, 5, 8, 10) at quality
+    layout ("scene" | "sprite" | "part") and background (sprite backdrop). An image sent with saga is a photo:
+    scene restyles it (prompt optional), sprite uses it as the backdrop, part redraws one character layer
+    (part = face | hand | body | hair | other) keeping its canvas and transparency; strength "light" |
+    "medium" | "strong"; changes = plain-English edits to the image; rewrite="0" sends the prompt to the
+    model as written instead of converting it to tags. saga_vid animates the uploaded still for video_seconds (3, 5, 8, 10) at quality
     ("smooth" 832 / "hd" 720p, both interpolated to 32 fps).
     """
     prompt = (prompt or "").strip()
@@ -661,6 +666,7 @@ async def start_job(
                 t2i_options = saga_mod.parse_still_options(
                     aspect=aspect, character=character, outfit=outfit, quality=quality,
                     layout=layout, background=background, photo=image is not None, strength=strength,
+                    part=part, changes=changes, rewrite=rewrite,
                 )
             else:
                 t2i_options = saga_mod.parse_motion_options(seconds=video_seconds, quality=quality)
