@@ -128,6 +128,18 @@ def _track_job_task(job_id: str, task: asyncio.Task) -> None:
     task.add_done_callback(_done)
 
 
+def _release_memory() -> None:
+    """Hand freed heap back to the OS after a job. glibc keeps per-thread arenas from finished job threads,
+    so without a trim the process grows job after job until Render's 512 MB limit kills it."""
+    gc.collect()
+    try:
+        import ctypes
+
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except (OSError, AttributeError):
+        pass
+
+
 def _spawn_job_thread(job_id: str, coro_factory) -> None:
     """
     Run generation on a dedicated thread + event loop so Render healthz
@@ -165,6 +177,7 @@ def _spawn_job_thread(job_id: str, coro_factory) -> None:
                 pass
         finally:
             _job_threads.pop(job_id, None)
+            _release_memory()
             with _dispatcher_lock:
                 if _active_worker_job_id == job_id:
                     _active_worker_job_id = None
