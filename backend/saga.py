@@ -86,6 +86,7 @@ PART_TYPES: dict[str, str] = {
 # Margin kept around a part's visible pixels when it is cropped out for redrawing.
 PART_MARGIN = 0.15
 CHANGES_MAX_CHARS = 500
+NEGATIVE_MAX_CHARS = 300
 # The game's flat cartoon colouring; without these, small parts drift to painted skin and soft mouths.
 PART_STYLE = "flat color, cel shading, clean dark brown lineart, simple shading"
 PART_NEGATIVE = NEGATIVE + (
@@ -255,6 +256,18 @@ def parse_denoise(raw: Any) -> Optional[float]:
     return round(value, 3)
 
 
+def parse_negative(raw: Optional[str]) -> Optional[str]:
+    """Extra things to keep out of the picture (added to the built-in negative), as written."""
+    text = re.sub(r"\s+", " ", raw or "").strip(" ,")
+    if len(text) > NEGATIVE_MAX_CHARS:
+        raise SagaError(f"Avoid can be at most {NEGATIVE_MAX_CHARS} characters")
+    return text or None
+
+
+def with_negative(base: str, opts: dict[str, Any]) -> str:
+    return _join(base, opts.get("negative") or "")
+
+
 def parse_count(raw: Any) -> int:
     if raw in (None, ""):
         return 1
@@ -285,11 +298,13 @@ def parse_still_options(
     keep_lines: Any = None,
     match_skin: Any = None,
     keep_size: Any = None,
+    negative: Optional[str] = None,
     context: bool = False,
     pair: bool = False,
 ) -> dict[str, Any]:
     """photo=True: scene restyles the uploaded photo, sprite uses it as the background, part redraws one layer.
     changes: plain-English edits to the uploaded image. rewrite: turn plain English into model tags (default on).
+    negative: extra words to keep out (e.g. "stubble, beard"), sent as written.
     count: variants on seeds seed..seed+count-1. denoise: exact img2img amount, overrides strength.
     Part only: context (layers beneath), pair (talking face redrawn from the main result), keep_lines,
     match_skin. keep_size: scene/sprite photos come back at the photo's own size."""
@@ -298,7 +313,7 @@ def parse_still_options(
         raise SagaError(f"Unknown character '{character}'")
     lay = _pick(layout, LAYOUTS, "scene", "layout")
     if lay == "part" and not photo:
-        raise SagaError("Part mode needs the part image (face, hand, bodyâ€¦)")
+        raise SagaError("Part mode needs the part image (face, hand, body…)")
     bg = (background or "").strip() or None
     if lay == "sprite":
         if not bg and not photo:
@@ -315,6 +330,7 @@ def parse_still_options(
     }
     opts["rewrite"] = _flag(rewrite, True)
     opts["count"] = parse_count(count)
+    opts["negative"] = parse_negative(negative)
     if (context or pair) and lay != "part":
         raise SagaError("context and pair images only work in Part mode")
     if photo:
@@ -630,12 +646,14 @@ def check_batch(files: dict[str, bytes], manifest: Any) -> dict[str, Any]:
     return {"items": clean}
 
 
-def parse_motion_options(*, seconds: Optional[Any] = None, quality: Optional[str] = None) -> dict[str, Any]:
+def parse_motion_options(
+    *, seconds: Optional[Any] = None, quality: Optional[str] = None, negative: Optional[str] = None,
+) -> dict[str, Any]:
     sec = parse_seconds(seconds)
     q = _pick(quality, VIDEO_QUALITIES, "smooth", "video quality")
     if q == "hd" and sec > HD_VIDEO_MAX_SECONDS:
         raise SagaError(f"720p clips can be at most {HD_VIDEO_MAX_SECONDS} seconds")
-    return {"seconds": sec, "quality": q}
+    return {"seconds": sec, "quality": q, "negative": parse_negative(negative)}
 
 
 def public_config(installed: Optional[set[str]]) -> dict[str, Any]:
@@ -876,7 +894,7 @@ async def _still_setup(
         photo=photo, strength=raw.get("strength"), part=raw.get("part"), changes=raw.get("changes"),
         rewrite=raw.get("rewrite"), count=raw.get("count"), denoise=raw.get("denoise"),
         keep_lines=raw.get("keep_lines"), match_skin=raw.get("match_skin"), keep_size=raw.get("keep_size"),
-        context=context, pair=pair,
+        negative=raw.get("negative"), context=context, pair=pair,
     )
 
     async def adapt(words: Optional[str]) -> str:
@@ -912,7 +930,8 @@ async def _render_part(
     sheet, w, h, plan = prepare_part(layer, context=context, repaint=repaint, region=region)
     out = await _render(client, lambda n: build_still_graph(
         subject, seed=seed, width=w, height=h, character=opts["character"], hd=opts["quality"] == "hd",
-        negative=PART_NEGATIVE, detail=False, source_image=n, denoise=denoise, masked=True), sheet)
+        negative=with_negative(PART_NEGATIVE, opts), detail=False, source_image=n, denoise=denoise,
+        masked=True), sheet)
     return finish_part(out, plan)
 
 
@@ -988,7 +1007,8 @@ async def run_still_outputs(
                         "prompt_used": subject, "strength": opts["strength"], "denoise": denoise,
                         "changes": opts.get("changes"), "part": opts["part"], "transparent": img.mode == "RGBA",
                         "context": context is not None, "keep_lines": opts["keep_lines"],
-                        "match_skin": opts["match_skin"], "role": role, "variant": i + 1, "variants": count}
+                        "match_skin": opts["match_skin"], "negative": opts["negative"], "role": role,
+                        "variant": i + 1, "variants": count}
                 outputs.append((_png(img), "image/png", {"model_label": label, "seed_used": seed + i, "saga": meta}))
         return outputs
 
@@ -1008,10 +1028,11 @@ async def run_still_outputs(
             denoise = _denoise(opts, bool(background))
             sprite = await _render(client, lambda _n: build_still_graph(
                 subject + SPRITE_SUFFIX, seed=s, width=sw, height=sh, character=opts["character"], hd=hd,
-                negative=SPRITE_NEGATIVE, cutout=True), None)
+                negative=with_negative(SPRITE_NEGATIVE, opts), cutout=True), None)
             back = await _render(client, lambda n: build_still_graph(
                 BACKGROUND_PREFIX + background, seed=s + 7, width=width, height=height,
-                hd=hd, negative=BACKGROUND_NEGATIVE, detail=False, source_image=n, denoise=denoise), photo)
+                hd=hd, negative=with_negative(BACKGROUND_NEGATIVE, opts), detail=False, source_image=n,
+                denoise=denoise), photo)
             data = compose_sprite(back, sprite)
             subject = _join(subject, f"background: {background}" if background else "")
         else:
@@ -1019,13 +1040,13 @@ async def run_still_outputs(
             denoise = _denoise(opts, bool(words["desc"] or words["edit"]))
             data = await _render(client, lambda n: build_still_graph(
                 subject, seed=s, width=width, height=height, character=opts["character"], hd=hd,
-                source_image=n, denoise=denoise), photo)
+                negative=with_negative(NEGATIVE, opts), source_image=n, denoise=denoise), photo)
         out_w, out_h = (_snap(width * HD_SCALE), _snap(height * HD_SCALE)) if hd else (width, height)
         if keep:
             img = Image.open(io.BytesIO(data)).convert("RGB")
             data, (out_w, out_h) = _png(img.resize(keep, Image.Resampling.LANCZOS)), keep
         meta = {**base, "kind": "still", "aspect": opts["aspect"], "width": out_w, "height": out_h,
-                "prompt_used": subject}
+                "prompt_used": subject, "negative": opts["negative"]}
         if photo:
             meta.update(kind="photo", aspect="photo", strength=opts["strength"], denoise=denoise,
                         changes=opts.get("changes"))
@@ -1093,19 +1114,19 @@ async def run_batch(
         shared_subject, shared_denoise = part_subject(opts, words), _part_denoise(opts, words)
         summary = {"prompt_used": shared_subject, "seed_used": seed, "denoise": shared_denoise,
                    "strength": opts["strength"], "quality": opts["quality"], "part": opts["part"],
-                   "keep_lines": opts["keep_lines"], "match_skin": opts["match_skin"],
+                   "keep_lines": opts["keep_lines"], "match_skin": opts["match_skin"], "negative": opts["negative"],
                    "done": done, "failed": len(report) - done, "total": len(items), "stopped": stopped,
                    "items": report}
         zf.writestr("report.json", json.dumps(summary, indent=1))
     meta = {key: summary[key] for key in ("prompt_used", "denoise", "strength", "quality", "part", "keep_lines",
-                                          "match_skin", "done", "failed", "total", "stopped")}
+                                          "match_skin", "negative", "done", "failed", "total", "stopped")}
     meta.update(kind="batch", layout="part", character=opts["character"], changes=opts.get("changes"))
     return buf.getvalue(), "application/zip", {"model_label": _label(opts["character"]), "seed_used": seed,
                                                "saga": meta}
 
 
 def segment_plan(seconds: int) -> tuple[int, int]:
-    """(segments, frames per segment) â€” clips over 5 s are two chained segments sharing one frame."""
+    """(segments, frames per segment) — clips over 5 s are two chained segments sharing one frame."""
     segments = 1 if seconds <= SEGMENT_MAX_SECONDS else 2
     frames = round(seconds * VIDEO_FPS / segments)
     return segments, (frames // 4) * 4 + 1
@@ -1147,7 +1168,8 @@ async def run_motion(
     text = check_prompt(prompt)
     opts = dict(options or {})
     opts.setdefault("seconds", seconds)
-    opts = parse_motion_options(seconds=opts.get("seconds"), quality=opts.get("quality"))
+    opts = parse_motion_options(seconds=opts.get("seconds"), quality=opts.get("quality"),
+                                negative=opts.get("negative"))
     sec, quality = opts["seconds"], opts["quality"]
     seed = seed if seed is not None else random.randint(0, 2**32 - 1)
     segments, seg_len = segment_plan(sec)
@@ -1156,7 +1178,7 @@ async def run_motion(
     data, ctype = await client.generate_video(
         image_bytes,
         MOTION_PREFIX + text,
-        negative=MOTION_NEGATIVE,
+        negative=with_negative(MOTION_NEGATIVE, opts),
         seed=seed,
         width=box,
         height=box,
@@ -1176,5 +1198,5 @@ async def run_motion(
         "model_label": "anisora3.2_full+rife",
         "seed_used": seed,
         "saga": {"kind": "motion", "seconds": sec, "quality": quality,
-                 "fps": VIDEO_FPS * interpolate, "segments": segments},
+                 "fps": VIDEO_FPS * interpolate, "segments": segments, "negative": opts["negative"]},
     }

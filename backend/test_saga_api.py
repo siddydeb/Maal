@@ -141,6 +141,27 @@ class EndpointTests(unittest.TestCase):
         self.assertNotIn("unused.png", files)
         self.assertEqual(stored_manifest["items"][0]["pair"], ["jenny/f_gross_talk.png"])
 
+    def test_rewrite_off_keeps_prompt_as_typed(self):
+        r = self.client.post("/api/jobs", data={"mode": "saga", "prompt": "1boy, navy blue pants, long black hair",
+                                                "rewrite": "0", "negative": " stubble,  beard "})
+        self.assertEqual(r.status_code, 200, r.text)
+        job = self.created[0]
+        self.assertEqual(job["prompt_english"], "1boy, navy blue pants, long black hair")
+        self.assertEqual(job["options"]["negative"], "stubble, beard")
+
+    def test_rewrite_on_never_recolors(self):
+        r = self.client.post("/api/jobs", data={"mode": "saga", "prompt": "man wearing navy blue pants, jacket black"})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertNotIn("change", self.created[0]["prompt_english"])
+
+    def test_batch_negative_and_raw_prompt(self):
+        r = self.client.post("/api/saga/batch", data={
+            "manifest": json.dumps({"items": [{"image": "f.png"}]}), "prompt": "navy blue shirt",
+            "rewrite": "0", "negative": "stubble, beard"}, files=[("files", ("f.png", _png()))])
+        self.assertEqual(r.status_code, 200, r.text)
+        job = self.created[0]
+        self.assertEqual((job["prompt_english"], job["options"]["negative"]), ("navy blue shirt", "stubble, beard"))
+
     def test_batch_bad_manifest(self):
         r = self.client.post("/api/saga/batch", data={"manifest": json.dumps({"items": [{"image": "x.png"}]})},
                              files=[("files", ("y.png", _png()))])

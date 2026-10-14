@@ -18,6 +18,7 @@ import SagaGuide from "./SagaGuide.jsx";
 
 const PROMPT_MAX = 800;
 const CHANGES_MAX = 500;
+const AVOID_MAX = 300;
 const ASPECTS = [
   ["landscape", "Landscape"],
   ["portrait", "Portrait"],
@@ -29,6 +30,7 @@ const QUALITIES = [
 ];
 const LIBRARY_OPEN_KEY = "saga.libraryOpen";
 const REWRITE_KEY = "saga.rewrite";
+const AVOID_KEY = "saga.avoid";
 const TABS = [
   ["studio", "Studio"],
   ["guide", "Prompt guide"],
@@ -172,6 +174,7 @@ export default function SagaStudio() {
   const [partType, setPartType] = useState("face");
   const [changes, setChanges] = useState("");
   const [rewrite, setRewrite] = useState(() => localStorage.getItem(REWRITE_KEY) !== "0");
+  const [avoid, setAvoid] = useState(() => localStorage.getItem(AVOID_KEY) || "");
   const [count, setCount] = useState(1);
   const [context, setContext] = useState(null);
   const [pair, setPair] = useState(null);
@@ -295,6 +298,12 @@ export default function SagaStudio() {
     localStorage.setItem(REWRITE_KEY, on ? "1" : "0");
   }
 
+  function onAvoidChange(value) {
+    const next = value.slice(0, AVOID_MAX);
+    setAvoid(next);
+    localStorage.setItem(AVOID_KEY, next);
+  }
+
   function onPickLayout(next) {
     setLayout(next);
     if (next === "part") setStrength("subtle");
@@ -329,7 +338,10 @@ export default function SagaStudio() {
     const base =
       text || changes.trim() || (part ? `${partType} part in Saga style` : "Photo in Saga style");
     const label = (picked ? `${picked.label}: ${base}` : base) + (count > 1 ? ` (×${count})` : "");
-    await enqueue({ mode: "saga", prompt: text, saga, file: photo || undefined }, label);
+    await enqueue(
+      { mode: "saga", prompt: text, saga, negative: avoid.trim() || undefined, file: photo || undefined },
+      label
+    );
   }
 
   async function onAnimate() {
@@ -345,7 +357,14 @@ export default function SagaStudio() {
       return;
     }
     const ok = await enqueue(
-      { mode: "saga_vid", prompt: text, file, videoSeconds: seconds, saga: { quality: videoQuality } },
+      {
+        mode: "saga_vid",
+        prompt: text,
+        file,
+        videoSeconds: seconds,
+        negative: avoid.trim() || undefined,
+        saga: { quality: videoQuality },
+      },
       `Animate: ${text}`
     );
     if (ok) {
@@ -579,6 +598,26 @@ export default function SagaStudio() {
                   </div>
                 )}
 
+                <div className="section">
+                  <div className="section-head">
+                    <h2 className="section-title">Avoid (optional)</h2>
+                    <span className="char-count">
+                      {avoid.length}/{AVOID_MAX}
+                    </span>
+                  </div>
+                  <input
+                    className="saga-bg-input"
+                    type="text"
+                    maxLength={AVOID_MAX}
+                    placeholder="Things to keep out, e.g. stubble, beard, glasses, tattoos"
+                    value={avoid}
+                    onChange={(e) => onAvoidChange(e.target.value)}
+                  />
+                  <p className="setting-hint">
+                    Sent exactly as typed and remembered on this device. Short tags separated by commas work best.
+                  </p>
+                </div>
+
                 {sprite && (
                   <div className="section">
                     <h2 className="section-title">
@@ -758,6 +797,9 @@ export default function SagaStudio() {
             )}
             {viewer.meta?.saga?.prompt_used && (
               <p className="lightbox-caption saga-model-prompt">Model read: {viewer.meta.saga.prompt_used}</p>
+            )}
+            {viewer.meta?.saga?.negative && (
+              <p className="lightbox-caption saga-model-prompt">Avoided: {viewer.meta.saga.negative}</p>
             )}
             {viewer.meta?.seed_used != null && viewer.meta?.saga && (
               <p className="lightbox-caption saga-model-prompt">

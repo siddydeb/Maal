@@ -41,7 +41,18 @@ export default function SagaGuide() {
         words it picked up.
       </p>
       <p>
-        If you already write tags (four or more short comma-separated pieces), they are sent as they are.
+        If you already write tags (four or more short comma-separated pieces), they are sent as they are. With
+        the switch off, the model gets your words exactly as typed (so <code>navy blue pants</code> stays
+        <code>navy blue pants</code>).
+      </p>
+
+      <h3>Avoid</h3>
+      <p>
+        The <b>Avoid</b> box (Studio tab) lists things to keep out of the picture, as short tags:{" "}
+        <code>stubble, beard</code> keeps a man clean-shaven, <code>glasses, tattoos</code> stops them creeping in.
+        It is added to the built-in quality filters, sent exactly as typed, remembered on this device and used for
+        animations too. Say what you want in the description and what you don't want here; "no beard" in the
+        description can backfire because the model still sees the word "beard".
       </p>
 
       <h3>Order that works best</h3>

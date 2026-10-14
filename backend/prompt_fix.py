@@ -267,11 +267,13 @@ def normalize_prompt(
     mode: Mode = "img",
     *,
     frame: bool = True,
+    recolor: bool = True,
 ) -> dict[str, str]:
     """
     Returns {original, cleaned, english} where english is what ComfyUI should use.
     Set frame=False for negatives (translate/clean only, no edit/motion wrapper).
     When settings.raw_prompt is True, framing is skipped even if frame=True.
+    recolor=False keeps "jacket black" as written instead of "change jacket to black".
     """
     original = (raw or "").strip()
     if not original:
@@ -295,8 +297,9 @@ def normalize_prompt(
     )
     english = _clean_spaces(english)
     # "jacket black" / "hair brown" → "change jacket to black" (skip if already "… to COLOR")
-    # Never rewrite "and black" / "her white" / "on red" — those are grammar, not recolors.
-    if not re.search(
+    # Never rewrite "and black" / "her white" / "on red" — those are grammar, not recolors —
+    # nor "navy blue pants" / "long black hair", where the colour describes the word after it.
+    if recolor and not re.search(
         r"\bto\s+(black|white|red|blue|green|yellow|brown|pink|orange|purple|gray|grey)\b",
         english,
         flags=re.IGNORECASE,
@@ -321,6 +324,32 @@ def normalize_prompt(
             "in",
             "into",
             "onto",
+            "navy",
+            "light",
+            "dark",
+            "pale",
+            "bright",
+            "deep",
+            "sky",
+            "royal",
+            "baby",
+            "hot",
+            "pastel",
+            "neon",
+            "off",
+            "jet",
+            "pitch",
+            "snow",
+            "blood",
+            "olive",
+            "forest",
+            "lime",
+            "teal",
+            "dusty",
+            "muted",
+            "long",
+            "short",
+            "all",
         }
 
         def _recolor(match: re.Match[str]) -> str:
@@ -331,7 +360,8 @@ def normalize_prompt(
 
         english = re.sub(
             r"\b(?:change\s+)?([A-Za-z][\w'/]{1,38})\s+"
-            r"(black|white|red|blue|green|yellow|brown|pink|orange|purple|gray|grey)\b",
+            r"(black|white|red|blue|green|yellow|brown|pink|orange|purple|gray|grey)\b"
+            r"(?!\s+(?!(?:and|or|please|now|instead|color|colour|in|on|with|for|but)\b)[A-Za-z])",
             _recolor,
             english,
             flags=re.IGNORECASE,

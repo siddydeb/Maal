@@ -75,7 +75,8 @@ class OptionTests(unittest.TestCase):
     def test_still_options(self):
         opts = saga.parse_still_options()
         self.assertEqual(opts, {"aspect": "landscape", "character": None, "outfit": True, "quality": "hd",
-                                "layout": "scene", "background": None, "rewrite": True, "count": 1})
+                                "layout": "scene", "background": None, "rewrite": True, "count": 1,
+                                "negative": None})
         self.assertFalse(saga.parse_still_options(rewrite="0")["rewrite"])
         opts = saga.parse_still_options(character="Debbie", outfit="0", quality="fast")
         self.assertEqual((opts["character"], opts["outfit"], opts["quality"]), ("debbie", False, "fast"))
@@ -490,6 +491,20 @@ class GraphTests(unittest.TestCase):
 
         asyncio.run(saga.run_still(_Client(), "a woman reading in a park", seed=1, options={"rewrite": False}))
         self.assertTrue(graphs[0]["5"]["inputs"]["text"].endswith("a woman reading in a park"))
+        self.assertEqual(graphs[0]["6"]["inputs"]["text"], saga.NEGATIVE)
+
+    def test_avoid_words_join_the_negative(self):
+        client = self._PartClient()
+        _, _, meta = asyncio.run(saga.run_still(client, "", seed=1, image_bytes=self._png(self._face()),
+                                                options={"layout": "part", "negative": " stubble,  beard ,"}))
+        self.assertEqual(client.graphs[0]["6"]["inputs"]["text"], saga.PART_NEGATIVE + ", stubble, beard")
+        self.assertEqual(meta["saga"]["negative"], "stubble, beard")
+
+    def test_avoid_is_limited(self):
+        self.assertIsNone(saga.parse_still_options(negative="  ")["negative"])
+        with self.assertRaises(saga.SagaError):
+            saga.parse_still_options(negative="x" * (saga.NEGATIVE_MAX_CHARS + 1))
+        self.assertEqual(saga.parse_motion_options(negative="beard")["negative"], "beard")
 
     def test_cutout_graph(self):
         g = saga.build_still_graph("x", seed=1, width=768, height=1344, cutout=True)
@@ -531,8 +546,9 @@ class GraphTests(unittest.TestCase):
         return calls, result
 
     def test_motion_options(self):
-        self.assertEqual(saga.parse_motion_options(), {"seconds": 5, "quality": "smooth"})
-        self.assertEqual(saga.parse_motion_options(seconds="5", quality="hd"), {"seconds": 5, "quality": "hd"})
+        self.assertEqual(saga.parse_motion_options(), {"seconds": 5, "quality": "smooth", "negative": None})
+        self.assertEqual(saga.parse_motion_options(seconds="5", quality="hd"),
+                         {"seconds": 5, "quality": "hd", "negative": None})
         with self.assertRaises(saga.SagaError):
             saga.parse_motion_options(seconds=10, quality="hd")
         with self.assertRaises(saga.SagaError):
@@ -546,7 +562,9 @@ class GraphTests(unittest.TestCase):
         self.assertEqual(calls["length"], 3 * saga.VIDEO_FPS + 1)
         self.assertEqual((calls["steps"], calls["cfg"], calls["width"]), (8, 1.0, 1280))
         self.assertTrue(calls["prompt"].endswith("she waves"))
-        self.assertEqual(meta["saga"], {"kind": "motion", "seconds": 3, "quality": "hd", "fps": 32, "segments": 1})
+        self.assertEqual(meta["saga"], {"kind": "motion", "seconds": 3, "quality": "hd", "fps": 32, "segments": 1,
+                                        "negative": None})
+        self.assertEqual(calls["negative"], saga.MOTION_NEGATIVE)
 
     def test_motion_long_graph(self):
         calls, (_, _, meta) = self._motion(seconds=10)

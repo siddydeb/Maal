@@ -567,6 +567,18 @@ async def generate(
     return _json(payload)
 
 
+def _resolve_prompt(prompt: str, mode: str, options: Optional[dict] = None) -> dict[str, str]:
+    """normalize_prompt, except Saga keeps its words: exactly as typed when rewrite is off, and never
+    recoloured ("navy blue pants" stays as is) or wrapped in edit framing when the tag rewrite is on."""
+    from backend.prompt_fix import normalize_prompt
+
+    if mode not in ("saga", "saga_vid"):
+        return normalize_prompt(prompt, mode=mode)
+    if mode == "saga" and (options or {}).get("rewrite") is False:
+        return {"original": prompt, "cleaned": prompt, "english": prompt}
+    return normalize_prompt(prompt, mode=mode, frame=False, recolor=False)
+
+
 @app.post("/api/jobs")
 async def start_job(
     mode: Literal["img", "vid", "t2i", "saga", "saga_vid"] = Form(...),
@@ -619,7 +631,8 @@ async def start_job(
     (part = face | hand | body | hair | other) repainting only inside its own outline and keeping its canvas
     and transparency; strength "subtle" | "light" | "medium" | "strong" or an exact denoise (0.2-0.8);
     changes = plain-English edits to the image; rewrite="0" sends the prompt to the model as written instead
-    of converting it to tags; count (1-4) renders seeds seed..seed+count-1. Part only: context = the layers
+    of converting it to tags; negative = extra things to keep out (saga and saga_vid add it, as written, to
+    the built-in negative); count (1-4) renders seeds seed..seed+count-1. Part only: context = the layers
     beneath (same canvas), pair = the talking face (rebuilt from the main result, redrawing only where it
     differs), keep_lines="1" copies the original outlines back, match_skin="1" matches the skin tones to the
     context. keep_size="1" returns scene/sprite photos at their own size. The job result carries
@@ -679,11 +692,13 @@ async def start_job(
                     aspect=aspect, character=character, outfit=outfit, quality=quality,
                     layout=layout, background=background, photo=image is not None, strength=strength,
                     part=part, changes=changes, rewrite=rewrite, count=count, denoise=denoise,
-                    keep_lines=keep_lines, match_skin=match_skin, keep_size=keep_size,
+                    keep_lines=keep_lines, match_skin=match_skin, keep_size=keep_size, negative=negative,
                     context=context is not None, pair=pair is not None,
                 )
             else:
-                t2i_options = saga_mod.parse_motion_options(seconds=video_seconds, quality=quality)
+                t2i_options = saga_mod.parse_motion_options(
+                    seconds=video_seconds, quality=quality, negative=negative
+                )
         except saga_mod.SagaError as exc:
             raise HTTPException(400, str(exc)) from exc
 
@@ -702,9 +717,9 @@ async def start_job(
 
     from backend.prompt_fix import normalize_prompt
 
-    resolved = normalize_prompt(prompt, mode=mode)
+    resolved = _resolve_prompt(prompt, mode, t2i_options)
     prompt_en = resolved["english"] or prompt
-    if negative:
+    if negative and not is_saga_mode:
         neg_resolved = normalize_prompt(negative, mode=mode, frame=False)
         negative = neg_resolved["english"] or negative
 
@@ -807,6 +822,7 @@ async def saga_batch(
     keep_lines: Optional[str] = Form(None),
     match_skin: Optional[str] = Form(None),
     rewrite: Optional[str] = Form(None),
+    negative: Optional[str] = Form(None),
     character: Optional[str] = Form(None),
     outfit: Optional[str] = Form(None),
     client_key: Optional[str] = Form(None),
@@ -824,7 +840,6 @@ async def saga_batch(
     under the same names plus report.json. Delete it afterwards with DELETE /api/generations/{result.id}.
     """
     from backend import saga as saga_mod
-    from backend.prompt_fix import normalize_prompt
 
     if not is_saga_owner(owner):
         raise HTTPException(403, "This mode is not available for this PIN")
@@ -853,7 +868,7 @@ async def saga_batch(
         options = saga_mod.parse_still_options(
             layout="part", photo=True, strength=strength, part=part, changes=changes, rewrite=rewrite,
             denoise=denoise, keep_lines=keep_lines, match_skin=match_skin, quality=quality,
-            character=character, outfit=outfit,
+            character=character, outfit=outfit, negative=negative,
         )
     except saga_mod.SagaError as exc:
         raise HTTPException(400, str(exc)) from exc
@@ -875,7 +890,7 @@ async def saga_batch(
                           "mode": "saga", "deduped": True})
     if not await _comfy().health(timeout=12.0, retries=3):
         raise HTTPException(503, "ComfyUI is not reachable. Start the GPU box and try again.")
-    prompt_en = normalize_prompt(prompt, mode="saga")["english"] or prompt
+    prompt_en = _resolve_prompt(prompt, "saga", options)["english"] or prompt
     job = await db.create_job(
         mode="saga",
         prompt=prompt,
@@ -1297,10 +1312,10 @@ async def _resume_persisted_job(job: dict) -> None:
     prompt = (job.get("prompt") or "").strip()
     prompt_en = (job.get("prompt_english") or "").strip() or prompt
     negative = job.get("negative")
-    resolved = normalize_prompt(prompt, mode=mode)
+    resolved = _resolve_prompt(prompt, mode, job.get("options"))
     if not prompt_en:
         prompt_en = resolved.get("english") or prompt
-    if negative:
+    if negative and mode not in ("saga", "saga_vid"):
         neg_resolved = normalize_prompt(negative, mode=mode, frame=False)
         negative = neg_resolved.get("english") or negative
 
