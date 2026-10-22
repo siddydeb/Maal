@@ -349,6 +349,20 @@ Often invoked as post dependencies of `video_i2v` profiles; also callable as sta
 
 Registered as experimental after I2V meets runtime/reliability targets. Extend = last-frame chain / overlapping windows with continuity prompts.
 
+### 5.16 Saga part redraw (`mode=saga`, `layout=part`)
+
+Redraws one transparent game layer (face, hand, body…) inside its own outline in the Anima style.
+
+- **Sheet** (`saga.prepare_part`): one uploaded PNG of equal panels, `picture | mask | [lines] | [gray]`. Each panel has the same crop, scale and padding, so the panels line up pixel for pixel. Without control the sheet is the original two panels.
+- **Graph** (`saga.build_still_graph(masked=True)`): LoadImage 50 → ImageCrop 51 (picture) / 52 (mask) → ImageToMask 53 → VAEEncode 54 → SetLatentNoiseMask 7 → KSampler 8. HD adds node 55 for KSampler 15.
+- **Structure control** (`control=inpaint,lines,gray`): `AnimaLLLiteApply_sdscripts` nodes 62+ are chained after the LoRAs (`preserve_wrapper=True`), and both KSampler 8 and HD 15 use the patched model.
+  - `inpaint` reads crops 51 and 53.
+  - `lines` and `gray` read crops 60 and 61 (panels 2 and 3).
+  - Control images are derived from the original layer over its context unless `control_image`, `control_image_lines` or `control_image_gray` (full canvas, same size as the layer) is uploaded.
+  - Followers (talking face, animation frames) use the same region and derive their controls from their own original.
+- **Checks**: the job fails up front with "Anima LLLite not installed on the GPU: <file>" when the node or a weight is missing; there is no silent fallback. `GET /api/saga/config` lists `controls` (installed only) and `control_denoise_max` (0.95).
+- **Result meta**: `control`, `control_strength`, `control_start`, `control_end`. `debug=1` also returns the sheet the model saw (`role: debug`).
+
 ---
 
 ## 6. Fallback graph (registry-driven)

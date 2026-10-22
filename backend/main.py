@@ -593,10 +593,12 @@ def _resolve_prompt(prompt: str, mode: str, options: Optional[dict] = None) -> d
 
 
 @app.post("/api/jobs")
+@app.post("/api/saga")
 async def start_job(
     mode: Literal["img", "vid", "t2i", "saga", "saga_vid"] = Form(...),
-    prompt: str = Form(...),
+    prompt: str = Form(""),
     image: Optional[UploadFile] = File(None),
+    photo: Optional[UploadFile] = File(None),
     negative: Optional[str] = Form(None),
     seed: Optional[int] = Form(None),
     video_seconds: Optional[str] = Form(None),
@@ -623,6 +625,15 @@ async def start_job(
     keep_lines: Optional[str] = Form(None),
     match_skin: Optional[str] = Form(None),
     keep_size: Optional[str] = Form(None),
+    control: Optional[str] = Form(None),
+    control_strength: Optional[str] = Form(None),
+    control_start: Optional[str] = Form(None),
+    control_end: Optional[str] = Form(None),
+    control_model: Optional[str] = Form(None),
+    control_image: Optional[UploadFile] = File(None),
+    control_image_lines: Optional[UploadFile] = File(None),
+    control_image_gray: Optional[UploadFile] = File(None),
+    debug: Optional[str] = Form(None),
     owner: str = Depends(require_owner),
 ):
     """
@@ -651,7 +662,20 @@ async def start_job(
     context. keep_size="1" returns scene/sprite photos at their own size. The job result carries
     prompt_used, seed_used, denoise and every variant. saga_vid animates the uploaded still for
     video_seconds (3, 5, 8, 10) at quality ("smooth" 832 / "hd" 720p, both interpolated to 32 fps).
+
+    Part structure control (Anima ControlNet-LLLite; also POST /api/saga, where photo= is the layer):
+    control = comma-separated subset of "inpaint" (picture + repaint mask), "lines" (line image) and "gray"
+    (greyscale shading: keeps folds, lets colour change); with control, denoise may go up to 0.95.
+    control_strength 0-2 (one number, or per control like "inpaint:1.0,lines:0.8"; default 1.0);
+    control_start / control_end 0-1 (default 0 / 1); control_model "any" (any-test-like v2, default) or
+    "lineart1" for lines. control_image (PNG, same canvas as the layer) feeds lines and/or gray;
+    control_image_lines / control_image_gray feed one each. Without an upload the control image is derived
+    from the layer over its context (lines: black outlines on white; gray: luminance). debug="1" adds the
+    sheet the model saw (picture | mask | controls) as an extra output. The job fails with "Anima LLLite not
+    installed on the GPU: <file>" when the GPU lacks the node or weights. The result adds control,
+    control_strength, control_start and control_end.
     """
+    image = image or photo
     prompt = (prompt or "").strip()
     is_saga_mode = mode in ("saga", "saga_vid")
     if is_saga_mode != is_saga_owner(owner):
@@ -695,6 +719,8 @@ async def start_job(
             )
         except t2i_mod.T2IError as exc:
             raise HTTPException(400, str(exc)) from exc
+    control_files = {"control_image": control_image, "control_image_lines": control_image_lines,
+                     "control_image_gray": control_image_gray}
     if is_saga_mode:
         from backend import saga as saga_mod
 
@@ -706,7 +732,10 @@ async def start_job(
                     layout=layout, background=background, photo=image is not None, strength=strength,
                     part=part, changes=changes, rewrite=rewrite, count=count, denoise=denoise,
                     keep_lines=keep_lines, match_skin=match_skin, keep_size=keep_size, negative=negative,
+                    control=control, control_strength=control_strength, control_start=control_start,
+                    control_end=control_end, control_model=control_model, debug=debug,
                     context=context is not None, pair=pair is not None,
+                    uploads=[k for k, v in control_files.items() if v is not None],
                 )
             else:
                 t2i_options = saga_mod.parse_motion_options(
@@ -749,10 +778,10 @@ async def start_job(
     if is_tester_owner(owner):
         is_test = True
     image_bytes = await _read_image_bytes(image, keep_alpha=mode == "saga") if image is not None else None
-    if mode == "saga" and image_bytes and (context is not None or pair is not None):
+    extras = {"context": context, "pair": pair, **control_files}
+    if mode == "saga" and image_bytes and any(v is not None for v in extras.values()):
         from backend import saga as saga_mod
 
-        extras = {"context": context, "pair": pair}
         inputs = {"image": image_bytes}
         for key, upload in extras.items():
             if upload is not None:
@@ -836,6 +865,11 @@ async def saga_batch(
     match_skin: Optional[str] = Form(None),
     rewrite: Optional[str] = Form(None),
     negative: Optional[str] = Form(None),
+    control: Optional[str] = Form(None),
+    control_strength: Optional[str] = Form(None),
+    control_start: Optional[str] = Form(None),
+    control_end: Optional[str] = Form(None),
+    control_model: Optional[str] = Form(None),
     character: Optional[str] = Form(None),
     outfit: Optional[str] = Form(None),
     client_key: Optional[str] = Form(None),
@@ -847,8 +881,10 @@ async def saga_batch(
 
     files: every image the manifest names (repeat the "files" field; each upload's file name is its name in
     the manifest). manifest: JSON {"items": [{"image": "f_gross.png", "context": "body.png",
-    "pair": "f_gross_talk.png" or ["frame2.png", ...], "part": "face"}]}; context, pair and part are optional.
-    The other fields work as in POST /api/jobs part mode (one variant per item; seed is fixed now if omitted).
+    "pair": "f_gross_talk.png" or ["frame2.png", ...], "part": "face", "control_image": "f_gross_lines.png"}]};
+    context, pair, part and control_image / control_image_lines / control_image_gray are optional.
+    The other fields work as in POST /api/jobs part mode (one variant per item; seed is fixed now if omitted),
+    including control, control_strength, control_start, control_end and control_model.
     Poll GET /api/jobs/{id}: progress = {done, total}; when done, result.media_url is a zip of the outputs
     under the same names plus report.json. Delete it afterwards with DELETE /api/generations/{result.id}.
     """
@@ -881,15 +917,14 @@ async def saga_batch(
         options = saga_mod.parse_still_options(
             layout="part", photo=True, strength=strength, part=part, changes=changes, rewrite=rewrite,
             denoise=denoise, keep_lines=keep_lines, match_skin=match_skin, quality=quality,
-            character=character, outfit=outfit, negative=negative,
+            character=character, outfit=outfit, negative=negative, control=control,
+            control_strength=control_strength, control_start=control_start, control_end=control_end,
+            control_model=control_model,
+            uploads={k for item in clean["items"] for k in saga_mod.CONTROL_UPLOADS if k in item},
         )
     except saga_mod.SagaError as exc:
         raise HTTPException(400, str(exc)) from exc
-    used = {
-        name
-        for item in clean["items"]
-        for name in (item["image"], *item["pair"], *([item["context"]] if "context" in item else []))
-    }
+    used = {name for item in clean["items"] for name in saga_mod.item_inputs(item)}
     bundle = saga_mod.pack_inputs({name: uploads[name] for name in used}, clean)
     del uploads
     options.update(batch=True, items=len(clean["items"]))
@@ -1281,6 +1316,9 @@ async def _execute_generation(
             prompt_used=saga_meta.get("prompt_used"),
             denoise=saga_meta.get("denoise"),
         )
+        if "control" in saga_meta:
+            payload.update({k: saga_meta.get(k) for k in ("control", "control_strength", "control_start",
+                                                          "control_end")})
         if len(records) > 1:
             payload["variants"] = [
                 {
@@ -1601,7 +1639,11 @@ async def saga_config(_owner: str = Depends(require_owner)):
         installed = await _comfy().lora_names()
     except Exception:
         installed = None
-    return _json(saga_mod.public_config(installed))
+    try:
+        lllite = await _comfy().node_choices(saga_mod.LLLITE_NODE, "lllite_name") or set()
+    except Exception:
+        lllite = None
+    return _json(saga_mod.public_config(installed, lllite))
 
 
 def _training_http(exc: Exception) -> HTTPException:

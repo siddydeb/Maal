@@ -387,3 +387,28 @@ All scores below are **`benchmark_estimated: true`** until GPU fixtures promote 
 | video_v2v.experimental / video_extend.experimental | 0 |
 
 Promotion rule: after fixture run, set `benchmark_estimated=false` on the record and update this table.
+
+---
+
+## 9. Anima LLLite (Saga part structure control)
+
+ControlNet-LLLite for Anima, used only by Saga **part** redraws (`control=` on `/api/saga`, `/api/jobs`, `/api/saga/batch`).
+
+| Item | Value |
+|------|-------|
+| Node pack | `custom_nodes/ComfyUI-Anima-LLLite` (kohya-ss), node `AnimaLLLiteApply_sdscripts` (renamed upstream so it does not collide with ComfyUI core's own `AnimaLLLiteApply` / `ModelPatchLoader`; keep the pack updated) |
+| Weights (`models/controlnet`) | `anima-lllite-inpainting-v2.safetensors` (control `inpaint`), `anima-lllite-any-test-like-v2.safetensors` (`lines`, `gray`), `anima-lllite-lineart-1.safetensors` (`lines` with `control_model=lineart1`) |
+| Base model | Works on `anima-aesthetic-v1.1` (our UNET, not swapped); trained on anima-base v1.0, so quality may be slightly lower than on base |
+| License | CircleStone Labs Non-Commercial |
+
+Polarity and inputs:
+
+- **lines**: black lines on a white background (lineart-1 needs exactly this; any-test-like v2 was trained with lines inverted half the time, so either works there). Derived lines are pixels at luminance ≤ 70 fully dark, fading out by 110; transparent pixels are white.
+- **gray**: plain luminance of the picture (keeps shading and folds, lets the colour change).
+- **inpaint**: 4-channel (picture + mask); the node binarises the mask at 0.5 and blanks the RGB inside it, so inside the layer it only gives edge/colour context. Structure inside the redraw comes from `lines` / `gray`.
+
+Settings: the model card samples use strength 1.0, start 0, end 1.0, and the inpaint sample uses img2img at denoise 0.8 with `SetLatentNoiseMask` (er_sde / simple / cfg 4 / 30 steps — same as Saga). Use img2img with a mask, otherwise colours may shift slightly. API defaults: strength 1.0 (0–2, per control allowed), `control_start` 0, `control_end` 1.0. Clients should use `control_end` 0.8–1.0 and denoise 0.7–0.9; with control, denoise may go up to **0.95** (0.8 without).
+
+Resolution: v2 trained on 512²–1536² buckets (step 16). The node resizes the control image and mask to the latent size, so the same sheet panels serve the base pass and the 1.5× HD pass.
+
+Measured on the RTX 5060 Ti 16 GB (part layer 832×1216, HD, same seed): no control at denoise 0.5 took 70 s with a 14.7 GB VRAM peak; inpaint at 0.75 took 82 s with a 13.6 GB peak. Unmasked pixels drifted by a mean of 2.4/255 in both cases.

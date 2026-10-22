@@ -367,6 +367,19 @@ class ComfyClient:
         choices = spec[0] if spec and isinstance(spec[0], list) else []
         return {c for c in choices if isinstance(c, str)}
 
+    async def node_choices(self, node: str, field: str) -> Optional[set[str]]:
+        """Options of a node's dropdown input (e.g. the files it can load); None when the node is not installed."""
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            r = await client.get(f"{self.base}/object_info/{node}")
+            r.raise_for_status()
+            info = (r.json() or {}).get(node)
+        if not info:
+            return None
+        inputs = info.get("input") or {}
+        spec = (inputs.get("required") or {}).get(field) or (inputs.get("optional") or {}).get(field) or []
+        choices = spec[0] if spec and isinstance(spec[0], list) else []
+        return {c for c in choices if isinstance(c, str)}
+
     async def generate_video(
         self,
         image_bytes: bytes,

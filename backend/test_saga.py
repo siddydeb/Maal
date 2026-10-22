@@ -587,5 +587,230 @@ class GraphTests(unittest.TestCase):
         self.assertEqual((meta["saga"]["fps"], meta["saga"]["segments"]), (32, 2))
 
 
+ALL_LLLITE = {saga.LLLITE_INPAINT, saga.LLLITE_ANY, saga.LLLITE_LINEART}
+
+
+class ControlTests(unittest.TestCase):
+    """Anima LLLite structure control on part redraws."""
+
+    def _part(self, **kw):
+        return saga.parse_still_options(layout="part", photo=True, **kw)
+
+    def test_no_control_changes_nothing(self):
+        opts = self._part()
+        self.assertEqual((opts["control"], opts["debug"]), ([], False))
+        self.assertNotIn("control_strength", opts)
+        self.assertEqual(saga.control_specs(opts), [])
+        with self.assertRaises(saga.SagaError) as err:
+            self._part(denoise="0.9")
+        self.assertIn("0.95 with control", str(err.exception))
+
+    def test_control_options(self):
+        opts = self._part(control="gray, INPAINT", control_strength="inpaint:1.0,gray:0.7",
+                          control_start="0", control_end="0.8", denoise="0.9")
+        self.assertEqual(opts["control"], ["inpaint", "gray"])
+        self.assertEqual(opts["control_strength"], {"inpaint": 1.0, "gray": 0.7})
+        self.assertEqual((opts["control_start"], opts["control_end"], opts["denoise"]), (0.0, 0.8, 0.9))
+        self.assertEqual(self._part(control="lines,gray", control_strength="0.8")["control_strength"],
+                         {"lines": 0.8, "gray": 0.8})
+        self.assertEqual(self._part(control=["lines"], control_model="lineart1")["control_model"], "lineart1")
+        self.assertEqual(self._part(control="inpaint", denoise="0.95")["denoise"], 0.95)
+
+    def test_control_errors(self):
+        bad = [
+            dict(control="depth"),
+            dict(control="inpaint", control_strength="3"),
+            dict(control="inpaint", control_strength="lines:0.5"),
+            dict(control="inpaint", control_strength="inpaint=1"),
+            dict(control="inpaint", control_start="0.8", control_end="0.5"),
+            dict(control="inpaint", control_end="1.5"),
+            dict(control="inpaint", denoise="0.96"),
+            dict(control="lines", control_model="canny"),
+            dict(control="inpaint", uploads=["control_image"]),
+            dict(control="gray", uploads=["control_image_lines"]),
+            dict(control="lines", uploads=["mystery"]),
+        ]
+        for kw in bad:
+            with self.subTest(kw=kw), self.assertRaises(saga.SagaError):
+                self._part(**kw)
+        with self.assertRaises(saga.SagaError) as err:
+            saga.parse_still_options(photo=True, control="inpaint")
+        self.assertIn("Part mode", str(err.exception))
+        self.assertEqual(self._part(control="gray", uploads=["control_image"])["control"], ["gray"])
+
+    def test_specs_and_weights(self):
+        specs = saga.control_specs(self._part(control="gray,lines,inpaint", control_model="lineart1",
+                                              control_strength="lines:0.6", control_end="0.9"))
+        self.assertEqual([(s["kind"], s["weights"], s["strength"], s.get("panel")) for s in specs], [
+            ("inpaint", saga.LLLITE_INPAINT, 1.0, None),
+            ("lines", saga.LLLITE_LINEART, 0.6, 2),
+            ("gray", saga.LLLITE_ANY, 1.0, 3),
+        ])
+        self.assertTrue(all((s["start"], s["end"]) == (0.0, 0.9) for s in specs))
+
+    def test_graph_chains_lllite_on_both_samplers(self):
+        specs = saga.control_specs(self._part(control="inpaint,lines,gray"))
+        g = saga.build_still_graph("x", seed=1, width=512, height=640, hd=True, detail=False,
+                                   source_image="sheet.png", denoise=0.8, masked=True, controls=specs)
+        self.assertEqual([g[n]["class_type"] for n in ("62", "63", "64")], [saga.LLLITE_NODE] * 3)
+        self.assertEqual((g["62"]["inputs"]["model"], g["62"]["inputs"]["image"], g["62"]["inputs"]["mask"]),
+                         (["40", 0], ["51", 0], ["53", 0]))
+        self.assertEqual((g["63"]["inputs"]["model"], g["63"]["inputs"]["image"]), (["62", 0], ["60", 0]))
+        self.assertEqual((g["64"]["inputs"]["model"], g["64"]["inputs"]["image"]), (["63", 0], ["61", 0]))
+        self.assertEqual([(g[c]["inputs"]["x"], g[c]["inputs"]["width"]) for c in ("51", "52", "60", "61")],
+                         [(0, 512), (512, 512), (1024, 512), (1536, 512)])
+        self.assertEqual((g["8"]["inputs"]["model"], g["15"]["inputs"]["model"]), (["64", 0], ["64", 0]))
+        self.assertTrue(all(g[n]["inputs"]["preserve_wrapper"] for n in ("62", "63", "64")))
+        ids = [int(k) for k in g]
+        self.assertEqual(len(ids), len(set(ids)))
+
+    def test_graph_without_control_is_unchanged(self):
+        g = saga.build_still_graph("x", seed=1, width=512, height=640, hd=True, detail=False,
+                                   source_image="sheet.png", denoise=0.5, masked=True, controls=[])
+        self.assertFalse(any(n["class_type"] == saga.LLLITE_NODE for n in g.values()))
+        self.assertEqual((g["8"]["inputs"]["model"], g["15"]["inputs"]["model"]), (["40", 0], ["40", 0]))
+        with self.assertRaises(ValueError):
+            saga.build_still_graph("x", seed=1, width=512, height=640,
+                                   controls=saga.control_specs(self._part(control="gray")))
+
+    def _layer(self):
+        from PIL import Image
+
+        layer = Image.new("RGBA", (900, 700), (0, 0, 0, 0))
+        layer.paste((220, 170, 150, 255), (300, 200, 600, 500))
+        layer.paste((20, 20, 20, 255), (400, 300, 410, 310))
+        return layer
+
+    @staticmethod
+    def _dark_centre(img, x0, x1):
+        import numpy as np
+
+        a = np.asarray(img.convert("L"), dtype=np.float32)[:, x0:x1]
+        ys, xs = np.nonzero(a < 60)
+        return float(xs.mean()), float(ys.mean())
+
+    def test_sheet_panels_line_up(self):
+        from PIL import Image
+
+        layer = self._layer()
+        upload = Image.new("RGBA", layer.size, (0, 0, 0, 0))
+        upload.paste((0, 0, 0, 255), (400, 300, 410, 310))
+        png, w, h, plan = saga.prepare_part(layer, controls=[("lines", None), ("gray", upload)])
+        sheet = Image.open(BytesIO(png))
+        self.assertEqual(sheet.size, (w * 4, h))
+        spots = [self._dark_centre(sheet, w * i, w * (i + 1)) for i in (0, 2, 3)]
+        for x, y in spots[1:]:
+            self.assertLessEqual(abs(x - spots[0][0]) + abs(y - spots[0][1]), 1.0)
+        plain, w2, h2, plan2 = saga.prepare_part(layer)
+        self.assertEqual((Image.open(BytesIO(plain)).size, plan2), ((w * 2, h), plan))
+        self.assertEqual(Image.open(BytesIO(plain)).tobytes(), sheet.crop((0, 0, w * 2, h)).tobytes())
+
+    def test_derived_lines_and_gray(self):
+        from PIL import Image
+
+        img = Image.new("RGBA", (4, 1))
+        img.putdata([(50, 50, 50, 255), (200, 200, 200, 255), (90, 90, 90, 255), (10, 10, 10, 0)])
+        self.assertEqual([p[0] for p in saga.control_lines(img).getdata()], [0, 255, 128, 255])
+        gray = saga.control_gray(Image.new("RGB", (1, 1), (200, 100, 50))).getpixel((0, 0))
+        self.assertEqual(gray, (124, 124, 124))
+
+    def test_uploads_and_available(self):
+        self.assertEqual(saga.control_uploads({"control_image": "both", "control_image_gray": "g"}),
+                         {"lines": "both", "gray": "g"})
+        self.assertEqual(saga.available_controls(None), list(saga.CONTROLS))
+        self.assertEqual(saga.available_controls(set()), [])
+        self.assertEqual(saga.available_controls({saga.LLLITE_INPAINT, saga.LLLITE_LINEART}), ["inpaint", "lines"])
+        cfg = saga.public_config(set(), {saga.LLLITE_INPAINT})
+        self.assertEqual((cfg["controls"], cfg["control_denoise_max"]), (["inpaint"], 0.95))
+
+    class _Client(GraphTests._PartClient):
+        def __init__(self, lllite=frozenset(ALL_LLLITE), **kw):
+            super().__init__(**kw)
+            self.lllite = lllite
+
+        async def node_choices(self, node, field):
+            assert (node, field) == (saga.LLLITE_NODE, "lllite_name")
+            return None if self.lllite is None else set(self.lllite)
+
+    def _png(self, img):
+        return GraphTests._png(None, img)
+
+    def test_run_with_control_pair_and_debug(self):
+        from PIL import Image
+
+        layer = self._layer()
+        talking = layer.copy()
+        talking.paste((90, 10, 10, 255), (420, 400, 480, 420))
+        client = self._Client(colours=((90, 90, 90), (200, 10, 10)))
+        outputs = asyncio.run(saga.run_still_outputs(
+            client, "", seed=5, inputs={"image": self._png(layer), "pair": self._png(talking),
+                                        "control_image_lines": self._png(layer)},
+            options={"layout": "part", "control": "inpaint,lines,gray", "control_strength": "lines:0.8",
+                     "control_end": "0.9", "denoise": "0.85", "debug": "1", "rewrite": "0"}))
+        self.assertEqual([m["saga"]["role"] for _, _, m in outputs], ["main", "pair", "debug"])
+        self.assertEqual(len(client.graphs), 2)
+        for g in client.graphs:
+            self.assertEqual(g["8"]["inputs"]["model"], ["64", 0])
+            self.assertEqual(g["8"]["inputs"]["denoise"], 0.85)
+            self.assertEqual(g["60"]["inputs"]["x"], g["51"]["inputs"]["width"] * 2)
+        meta = outputs[0][2]["saga"]
+        self.assertEqual((meta["control"], meta["control_strength"], meta["control_start"], meta["control_end"]),
+                         (["inpaint", "lines", "gray"], {"inpaint": 1.0, "lines": 0.8, "gray": 1.0}, 0.0, 0.9))
+        self.assertEqual((meta["control_model"], meta["control_images"]), ("any", ["control_image_lines"]))
+        debug, _, dmeta = outputs[2]
+        sheet = Image.open(BytesIO(debug))
+        self.assertEqual(dmeta["saga"]["panels"], ["picture", "mask", "lines", "gray"])
+        self.assertEqual(sheet.size, (dmeta["saga"]["width"], dmeta["saga"]["height"]))
+
+    def test_no_control_needs_no_lllite(self):
+        client = GraphTests._PartClient()
+        outputs = asyncio.run(saga.run_still_outputs(
+            client, "", seed=5, inputs={"image": self._png(self._layer())}, options={"layout": "part"}))
+        self.assertEqual(len(outputs), 1)
+        self.assertEqual(outputs[0][2]["saga"]["control"], [])
+        self.assertFalse(any(n["class_type"] == saga.LLLITE_NODE for n in client.graphs[0].values()))
+
+    def test_missing_lllite_fails_the_job(self):
+        cases = [(None, "AnimaLLLiteApply_sdscripts node"),
+                 ({saga.LLLITE_INPAINT}, saga.LLLITE_ANY)]
+        for lllite, missing in cases:
+            client = self._Client(lllite=lllite)
+            with self.subTest(lllite=lllite), self.assertRaises(saga.SagaError) as err:
+                asyncio.run(saga.run_still_outputs(
+                    client, "", seed=1, inputs={"image": self._png(self._layer())},
+                    options={"layout": "part", "control": "inpaint,gray"}))
+            self.assertEqual(str(err.exception), f"Anima LLLite not installed on the GPU: {missing}"
+                             + (" (custom_nodes/ComfyUI-Anima-LLLite)" if lllite is None else ""))
+            self.assertEqual(client.graphs, [])
+
+    def test_control_image_must_match_size(self):
+        from PIL import Image
+
+        with self.assertRaises(saga.SagaError) as err:
+            asyncio.run(saga.run_still_outputs(
+                self._Client(), "", seed=1, options={"layout": "part", "control": "lines"},
+                inputs={"image": self._png(self._layer()),
+                        "control_image": self._png(Image.new("RGB", (100, 100), "white"))}))
+        self.assertIn("control_image", str(err.exception))
+
+    def test_batch_controls(self):
+        from PIL import Image
+
+        layer = self._layer()
+        files = {"a.png": self._png(layer), "a_lines.png": self._png(Image.new("RGB", layer.size, "white")),
+                 "b.png": self._png(layer)}
+        manifest = {"items": [{"image": "a.png", "control_image": "a_lines.png"}, {"image": "b.png"}]}
+        client = self._Client()
+        data, _, meta = asyncio.run(saga.run_batch(
+            client, "", seed=4, bundle=saga.pack_inputs(files, manifest),
+            options={"control": "inpaint,lines", "denoise": "0.8", "rewrite": "0"}))
+        self.assertEqual((meta["saga"]["control"], meta["saga"]["done"]), (["inpaint", "lines"], 2))
+        self.assertEqual(meta["saga"]["control_images"], ["control_image"])
+        self.assertEqual([g["63"]["class_type"] for g in client.graphs], [saga.LLLITE_NODE] * 2)
+        with self.assertRaises(saga.SagaError):
+            saga.check_batch({"a.png": files["a.png"], "c.png": self._png(Image.new("RGB", (10, 10)))},
+                             {"items": [{"image": "a.png", "control_image": "c.png"}]})
+
+
 if __name__ == "__main__":
     unittest.main()

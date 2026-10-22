@@ -97,6 +97,22 @@ MASK_GROW_PX = 17
 MASK_FEATHER_PX = 4
 # Talking face / animation frame: pixels differing from the main layer by more than this are redrawn.
 PAIR_DIFF = 24
+# Anima ControlNet-LLLite structure control for part redraws (custom node kohya-ss/ComfyUI-Anima-LLLite,
+# weights in models/controlnet). Settings and polarity notes: MODELS.md, "Anima LLLite".
+LLLITE_NODE = "AnimaLLLiteApply_sdscripts"
+LLLITE_INPAINT = "anima-lllite-inpainting-v2.safetensors"
+LLLITE_ANY = "anima-lllite-any-test-like-v2.safetensors"
+LLLITE_LINEART = "anima-lllite-lineart-1.safetensors"
+CONTROLS = ("inpaint", "lines", "gray")
+CONTROL_MODELS = {"any": LLLITE_ANY, "lineart1": LLLITE_LINEART}
+CONTROL_STRENGTH_RANGE = (0.0, 2.0)
+CONTROL_DENOISE_MAX = 0.95
+# Derived line control: black lines on white (lineart-1's polarity; any-test-like accepts both).
+# Luminance at or below CONTROL_LINE_DARK is a full line, fading to white by CONTROL_LINE_LIGHT.
+CONTROL_LINE_DARK, CONTROL_LINE_LIGHT = 70, 110
+# Uploaded control images and the controls each one feeds.
+CONTROL_UPLOADS = {"control_image": ("lines", "gray"), "control_image_lines": ("lines",),
+                   "control_image_gray": ("gray",)}
 # keep_lines: original pixels at or below LINE_DARK luminance are copied back fully, fading out by LINE_LIGHT.
 LINE_DARK, LINE_LIGHT = 50, 95
 # match_skin: pixels within this distance of the dominant skin tone count as skin. Lightness is weighted
@@ -243,17 +259,74 @@ def _flag(raw: Any, default: bool) -> bool:
     return text not in ("0", "false", "off", "no")
 
 
-def parse_denoise(raw: Any) -> Optional[float]:
+def parse_denoise(raw: Any, hi: float = DENOISE_RANGE[1]) -> Optional[float]:
     if raw in (None, ""):
         return None
     try:
         value = float(raw)
     except (TypeError, ValueError):
         raise SagaError("denoise must be a number") from None
-    lo, hi = DENOISE_RANGE
+    lo = DENOISE_RANGE[0]
     if not lo <= value <= hi:
-        raise SagaError(f"denoise must be between {lo} and {hi}")
+        hint = f" (up to {CONTROL_DENOISE_MAX} with control)" if hi < CONTROL_DENOISE_MAX else ""
+        raise SagaError(f"denoise must be between {lo} and {hi}{hint}")
     return round(value, 3)
+
+
+def _number(raw: Any, what: str, default: float, lo: float = 0.0, hi: float = 1.0) -> float:
+    if raw in (None, ""):
+        return default
+    try:
+        value = float(str(raw).strip())
+    except (TypeError, ValueError):
+        raise SagaError(f"{what} must be a number") from None
+    if not lo <= value <= hi:
+        raise SagaError(f"{what} must be between {lo} and {hi}")
+    return round(value, 3)
+
+
+def parse_control(raw: Any) -> list[str]:
+    """ "inpaint,gray" (or a list) -> the requested controls in chain order (inpaint, lines, gray)."""
+    names = raw if isinstance(raw, (list, tuple)) else str(raw or "").split(",")
+    names = [str(n).strip().lower() for n in names if str(n).strip()]
+    for name in names:
+        if name not in CONTROLS:
+            raise SagaError(f"Unknown control '{name}' (use {', '.join(CONTROLS)})")
+    return [c for c in CONTROLS if c in names]
+
+
+def parse_control_strength(raw: Any, controls: list[str]) -> dict[str, float]:
+    """One number for every control ("0.9") or per control ("inpaint:1.0,lines:0.8"); unnamed ones get 1.0."""
+    lo, hi = CONTROL_STRENGTH_RANGE
+    out = {c: 1.0 for c in controls}
+    if isinstance(raw, dict):
+        pairs = list(raw.items())
+    else:
+        text = str(raw if raw is not None else "").strip()
+        if not text:
+            return out
+        if ":" not in text:
+            value = _number(text, "control_strength", 1.0, lo, hi)
+            return {c: value for c in controls}
+        pairs = []
+        for piece in (p.strip() for p in text.split(",") if p.strip()):
+            if ":" not in piece:
+                raise SagaError("control_strength must be one number or pairs like inpaint:1.0,lines:0.8")
+            pairs.append(piece.split(":", 1))
+    for key, value in pairs:
+        name = str(key).strip().lower()
+        if name not in CONTROLS:
+            raise SagaError(f"Unknown control '{key}' in control_strength")
+        if name not in controls:
+            raise SagaError(f"control_strength sets {name}, but control does not include it")
+        out[name] = _number(value, f"control_strength for {name}", 1.0, lo, hi)
+    return out
+
+
+def control_weights(kind: str, model: str = "any") -> str:
+    if kind == "inpaint":
+        return LLLITE_INPAINT
+    return CONTROL_MODELS[model] if kind == "lines" else LLLITE_ANY
 
 
 def parse_negative(raw: Optional[str]) -> Optional[str]:
@@ -299,15 +372,26 @@ def parse_still_options(
     match_skin: Any = None,
     keep_size: Any = None,
     negative: Optional[str] = None,
+    control: Any = None,
+    control_strength: Any = None,
+    control_start: Any = None,
+    control_end: Any = None,
+    control_model: Optional[str] = None,
+    debug: Any = None,
     context: bool = False,
     pair: bool = False,
+    uploads: Any = (),
 ) -> dict[str, Any]:
     """photo=True: scene restyles the uploaded photo, sprite uses it as the background, part redraws one layer.
     changes: plain-English edits to the uploaded image. rewrite: turn plain English into model tags (default on).
     negative: extra words to keep out (e.g. "stubble, beard"), sent as written.
     count: variants on seeds seed..seed+count-1. denoise: exact img2img amount, overrides strength.
     Part only: context (layers beneath), pair (talking face redrawn from the main result), keep_lines,
-    match_skin. keep_size: scene/sprite photos come back at the photo's own size."""
+    match_skin. keep_size: scene/sprite photos come back at the photo's own size.
+    Part only, Anima LLLite: control = subset of inpaint, lines, gray (lets denoise go up to 0.95);
+    control_strength (0-2, one number or per control), control_start / control_end (0-1),
+    control_model "any" | "lineart1" (for lines), debug (also return the sheet the model saw).
+    uploads: names of the uploaded control images (CONTROL_UPLOADS keys) that come with the job."""
     char = (character or "").strip().lower() or None
     if char and char not in CHARACTERS:
         raise SagaError(f"Unknown character '{character}'")
@@ -333,10 +417,20 @@ def parse_still_options(
     opts["negative"] = parse_negative(negative)
     if (context or pair) and lay != "part":
         raise SagaError("context and pair images only work in Part mode")
+    controls = parse_control(control)
+    sent = sorted(set(uploads or ()))
+    if (controls or sent) and lay != "part":
+        raise SagaError("control only works in Part mode (layout=part)")
+    for name in sent:
+        if name not in CONTROL_UPLOADS:
+            raise SagaError(f"Unknown control upload '{name}'")
+        if not set(CONTROL_UPLOADS[name]) & set(controls):
+            raise SagaError(f"{name} is used by the {' / '.join(CONTROL_UPLOADS[name])} control; "
+                            f"add it to control")
     if photo:
         opts["photo"] = True
         opts["strength"] = _pick(strength, STRENGTHS, "light" if lay == "part" else "medium", "strength")
-        opts["denoise"] = parse_denoise(denoise)
+        opts["denoise"] = parse_denoise(denoise, CONTROL_DENOISE_MAX if controls else DENOISE_RANGE[1])
         edit = (changes or "").strip()[:CHANGES_MAX_CHARS] or None
         if edit:
             _check_adult(edit)
@@ -347,7 +441,67 @@ def parse_still_options(
         opts["part"] = _pick(part, PART_TYPES, "other", "part type")
         opts["keep_lines"] = _flag(keep_lines, False)
         opts["match_skin"] = _flag(match_skin, False)
+        opts["control"] = controls
+        opts["debug"] = _flag(debug, False)
+        start = _number(control_start, "control_start", 0.0)
+        end = _number(control_end, "control_end", 1.0)
+        strengths = parse_control_strength(control_strength, controls)
+        model = _pick(control_model, CONTROL_MODELS, "any", "control model")
+        if controls:
+            if start >= end:
+                raise SagaError("control_start must be below control_end")
+            opts.update(control_strength=strengths, control_start=start, control_end=end, control_model=model)
     return opts
+
+
+def control_specs(opts: dict[str, Any]) -> list[dict[str, Any]]:
+    """The LLLite nodes of a part job in chain order. lines / gray read sheet panels 2, 3 (after picture | mask)."""
+    specs, panel = [], 2
+    for kind in opts.get("control") or ():
+        spec = {"kind": kind, "weights": control_weights(kind, opts.get("control_model") or "any"),
+                "strength": opts["control_strength"][kind], "start": opts["control_start"],
+                "end": opts["control_end"]}
+        if kind != "inpaint":
+            spec["panel"] = panel
+            panel += 1
+        specs.append(spec)
+    return specs
+
+
+def control_uploads(images: dict[str, Any]) -> dict[str, Any]:
+    """Uploaded control images by control: a specific upload wins over the shared control_image."""
+    out = {}
+    for kind in ("lines", "gray"):
+        img = images.get(f"control_image_{kind}")
+        if img is None:
+            img = images.get("control_image")
+        if img is not None:
+            out[kind] = img
+    return out
+
+
+def available_controls(lllite: Optional[set[str]]) -> list[str]:
+    """Controls whose node and weights the GPU has; None (GPU unreachable) lists them all."""
+    if lllite is None:
+        return list(CONTROLS)
+    return [c for c in CONTROLS
+            if (LLLITE_INPAINT in lllite if c == "inpaint"
+                else any(w in lllite for w in CONTROL_MODELS.values()) if c == "lines"
+                else LLLITE_ANY in lllite)]
+
+
+async def check_controls_installed(client: Any, opts: dict[str, Any]) -> None:
+    """Fail a control job up front when the GPU lacks the node or a weights file (never fall back silently)."""
+    specs = control_specs(opts)
+    if not specs:
+        return
+    names = await client.node_choices(LLLITE_NODE, "lllite_name")
+    if names is None:
+        raise SagaError(f"Anima LLLite not installed on the GPU: {LLLITE_NODE} node "
+                        "(custom_nodes/ComfyUI-Anima-LLLite)")
+    for spec in specs:
+        if spec["weights"] not in names:
+            raise SagaError(f"Anima LLLite not installed on the GPU: {spec['weights']}")
 
 
 def prepare_photo(image_bytes: bytes, box: int = PHOTO_BOX) -> tuple[bytes, int, int]:
@@ -417,32 +571,70 @@ def part_region(layers: list[Any]) -> tuple[int, int, int, int]:
     return (max(0, x0 - mx), max(0, y0 - my), min(w, x1 + mx), min(h, y1 + my))
 
 
+def control_lines(rgba: Any) -> Any:
+    """Black lines on white from the dark pixels (outlines) of a picture; transparent pixels stay white."""
+    import numpy as np
+    from PIL import Image
+
+    a = np.asarray(rgba.convert("RGBA"), dtype=np.float32)
+    lum = a[..., :3] @ np.array([0.299, 0.587, 0.114], dtype=np.float32)
+    line = np.clip((CONTROL_LINE_LIGHT - lum) / (CONTROL_LINE_LIGHT - CONTROL_LINE_DARK), 0.0, 1.0) * a[..., 3] / 255.0
+    return Image.fromarray(np.clip(255.0 * (1.0 - line) + 0.5, 0, 255).astype(np.uint8), "L").convert("RGB")
+
+
+def control_gray(rgb: Any) -> Any:
+    """Plain luminance (keeps shading and folds, lets the colour change)."""
+    return rgb.convert("RGB").convert("L").convert("RGB")
+
+
 def prepare_part(
     layer: Any, *, context: Any = None, repaint: Any = None,
     region: Optional[tuple[int, int, int, int]] = None, box: int = PART_BOX,
+    controls: Any = (), structure: Any = None,
 ) -> tuple[bytes, int, int, dict[str, Any]]:
     """Crop the part's region from the layer laid over its context, scale it to fill box and pad (never crop)
     to multiples of 16; empty areas are filled by _bleed. Returns one PNG with the picture on the left and
-    the repaint mask (white = redraw; the layer's own pixels unless repaint is given) on the right.
+    the repaint mask (white = redraw; the layer's own pixels unless repaint is given) next to it.
+    controls: (kind, upload or None) per "lines" / "gray" control, each appended as one more panel with the
+    exact geometry of the picture. An upload (full canvas, the layer's size) is cropped like the picture;
+    otherwise the panel is derived from structure (default: the layer) laid over the context.
     The plan lets finish_part put the result back on the original canvas."""
     from PIL import Image, ImageFilter
 
     region = region or part_region([layer])
     picture = Image.alpha_composite(context, layer) if context is not None else layer
     repaint = repaint if repaint is not None else _visible(layer.getchannel("A"))
-    crop, mask_crop = picture.crop(region), repaint.crop(region)
-    scale = box / max(crop.size)
-    w, h = max(1, round(crop.width * scale)), max(1, round(crop.height * scale))
+    rw, rh = region[2] - region[0], region[3] - region[1]
+    scale = box / max(rw, rh)
+    w, h = max(1, round(rw * scale)), max(1, round(rh * scale))
     w16, h16 = max(16, -(-w // 16) * 16), max(16, -(-h // 16) * 16)
     left, top = (w16 - w) // 2, (h16 - h) // 2
-    canvas = Image.new("RGBA", (w16, h16), (0, 0, 0, 0))
-    canvas.paste(crop.resize((w, h), Image.Resampling.LANCZOS), (left, top))
-    mask = Image.new("L", (w16, h16), 0)
-    mask.paste(mask_crop.resize((w, h), Image.Resampling.BILINEAR), (left, top))
+
+    def place(img: Any, resample: Any, fill: Any) -> Any:
+        out = Image.new(img.mode, (w16, h16), fill)
+        out.paste(img.crop(region).resize((w, h), resample), (left, top))
+        return out
+
+    canvas = place(picture, Image.Resampling.LANCZOS, (0, 0, 0, 0))
+    mask = place(repaint, Image.Resampling.BILINEAR, 0)
     mask = mask.filter(ImageFilter.MaxFilter(MASK_GROW_PX)).filter(ImageFilter.GaussianBlur(MASK_FEATHER_PX))
-    sheet = Image.new("RGB", (w16 * 2, h16))
-    sheet.paste(_bleed(canvas), (0, 0))
-    sheet.paste(mask.convert("RGB"), (w16, 0))
+    panels = [_bleed(canvas), mask.convert("RGB")]
+    if controls:
+        if structure is None:
+            source = canvas
+        else:
+            under = Image.alpha_composite(context, structure) if context is not None else structure
+            source = place(under, Image.Resampling.LANCZOS, (0, 0, 0, 0))
+        for kind, upload in controls:
+            if upload is not None:
+                flat = Image.alpha_composite(Image.new("RGBA", upload.size, (255, 255, 255, 255)),
+                                             upload.convert("RGBA"))
+                panels.append(_bleed(place(flat, Image.Resampling.LANCZOS, (0, 0, 0, 0))))
+            else:
+                panels.append(control_lines(source) if kind == "lines" else control_gray(_bleed(source)))
+    sheet = Image.new("RGB", (w16 * len(panels), h16))
+    for i, panel in enumerate(panels):
+        sheet.paste(panel, (w16 * i, 0))
     plan = {"size": layer.size, "region": region, "canvas": (w16, h16), "inner": (left, top, w, h)}
     return _png(sheet), w16, h16, plan
 
@@ -609,7 +801,8 @@ def _as_list(raw: Any) -> list[str]:
 
 def check_batch(files: dict[str, bytes], manifest: Any) -> dict[str, Any]:
     """Validate a batch manifest against the uploaded files: names exist, images open, sizes match per item.
-    Item: {"image": name, "context"?: name, "pair"?: name or [names], "part"?: type}."""
+    Item: {"image": name, "context"?: name, "pair"?: name or [names], "part"?: type,
+    "control_image" / "control_image_lines" / "control_image_gray"?: name}."""
     from PIL import Image
 
     items = manifest.get("items") if isinstance(manifest, dict) else None
@@ -638,12 +831,20 @@ def check_batch(files: dict[str, bytes], manifest: Any) -> dict[str, Any]:
             entry["context"] = safe_name(item["context"])
         if item.get("part"):
             entry["part"] = _pick(item["part"], PART_TYPES, "other", "part type")
+        for key in CONTROL_UPLOADS:
+            if item.get(key):
+                entry[key] = safe_name(item[key])
         size = size_of(entry["image"])
-        for other in entry["pair"] + ([entry["context"]] if "context" in entry else []):
+        for other in item_inputs(entry)[1:]:
             if size_of(other) != size:
                 raise SagaError(f"'{other}' is {size_of(other)}, but '{entry['image']}' is {size}; they must match")
         clean.append(entry)
     return {"items": clean}
+
+
+def item_inputs(item: dict[str, Any]) -> list[str]:
+    """Every file a checked batch item uses: image first, then pairs, context and control images."""
+    return [item["image"], *item["pair"], *(item[k] for k in ("context", *CONTROL_UPLOADS) if k in item)]
 
 
 def parse_motion_options(
@@ -656,8 +857,9 @@ def parse_motion_options(
     return {"seconds": sec, "quality": q, "negative": parse_negative(negative)}
 
 
-def public_config(installed: Optional[set[str]]) -> dict[str, Any]:
-    """installed=None (GPU box unreachable) lists every character."""
+def public_config(installed: Optional[set[str]], lllite: Optional[set[str]] = None) -> dict[str, Any]:
+    """installed=None (GPU box unreachable) lists every character; lllite (the LLLite weights the GPU can
+    load, empty when the node is missing) likewise limits the part controls."""
     chars = [
         {"id": key, "label": c["label"], "outfit": c["outfit"]}
         for key, c in CHARACTERS.items()
@@ -671,6 +873,9 @@ def public_config(installed: Optional[set[str]]) -> dict[str, Any]:
         "part_types": list(PART_TYPES),
         "strengths": STRENGTHS,
         "denoise_range": list(DENOISE_RANGE),
+        "controls": available_controls(lllite),
+        "control_models": [k for k, w in CONTROL_MODELS.items() if lllite is None or w in lllite],
+        "control_denoise_max": CONTROL_DENOISE_MAX,
         "max_variants": MAX_VARIANTS,
         "video_seconds": list(VIDEO_SECONDS),
         "video_qualities": list(VIDEO_QUALITIES),
@@ -748,11 +953,16 @@ def build_still_graph(
     source_image: Optional[str] = None,
     denoise: float = 1.0,
     masked: bool = False,
+    controls: Optional[list[dict[str, Any]]] = None,
 ) -> dict[str, Any]:
     """Anima still. Node "9" is the base decode; hd adds 11-21 (upscale, resample, face + hand detailers).
     source_image (an uploaded ComfyUI input) replaces the empty latent for img2img at the given denoise.
     masked: source_image is prepare_part's sheet (picture | mask, each width x height) and only the
-    mask is redrawn, in the base and the HD pass."""
+    mask is redrawn, in the base and the HD pass.
+    controls (control_specs, masked only): Anima LLLite nodes 62+ chained on the model used by both samplers;
+    inpaint reads the picture and mask panels, lines / gray their own panel (crops 60, 61)."""
+    if controls and not (masked and source_image):
+        raise ValueError("LLLite controls need the masked part sheet")
     loras = [(STYLE_LORA, STYLE_STRENGTH_WITH_CHAR if character else STYLE_STRENGTH)]
     if character:
         loras.append((char_lora(character), CHAR_STRENGTH))
@@ -767,6 +977,19 @@ def build_still_graph(
         g[nid] = {"class_type": "LoraLoader", "inputs": {"model": model, "clip": clip, "lora_name": name,
                                                          "strength_model": strength, "strength_clip": strength}}
         model, clip = [nid, 0], [nid, 1]
+    for i, spec in enumerate(controls or ()):
+        nid = str(62 + i)
+        inputs = {"model": model, "lllite_name": spec["weights"], "strength": spec["strength"],
+                  "start_percent": spec["start"], "end_percent": spec["end"], "preserve_wrapper": True}
+        if spec["kind"] == "inpaint":
+            inputs.update(image=["51", 0], mask=["53", 0])
+        else:
+            crop_id = str(60 + spec["panel"] - 2)
+            g[crop_id] = {"class_type": "ImageCrop", "inputs": {"image": ["50", 0], "x": width * spec["panel"],
+                                                                "y": 0, "width": width, "height": height}}
+            inputs["image"] = [crop_id, 0]
+        g[nid] = {"class_type": LLLITE_NODE, "inputs": inputs}
+        model = [nid, 0]
     sampler = {"sampler_name": "er_sde", "scheduler": "simple", "cfg": 4.0}
     g.update({
         "5": {"class_type": "CLIPTextEncode", "inputs": {"text": STYLE_PREFIX + prompt, "clip": clip}},
@@ -884,6 +1107,7 @@ def new_seed() -> int:
 
 async def _still_setup(
     client: Any, prompt: str, options: dict[str, Any], *, photo: bool, context: bool = False, pair: bool = False,
+    uploads: Any = (),
 ) -> tuple[dict[str, Any], dict[str, str]]:
     """Validate the options and rewrite the words once (shared by variants and batch items)."""
     text = check_prompt(prompt, allow_empty=photo)
@@ -894,8 +1118,12 @@ async def _still_setup(
         photo=photo, strength=raw.get("strength"), part=raw.get("part"), changes=raw.get("changes"),
         rewrite=raw.get("rewrite"), count=raw.get("count"), denoise=raw.get("denoise"),
         keep_lines=raw.get("keep_lines"), match_skin=raw.get("match_skin"), keep_size=raw.get("keep_size"),
-        negative=raw.get("negative"), context=context, pair=pair,
+        negative=raw.get("negative"), control=raw.get("control"), control_strength=raw.get("control_strength"),
+        control_start=raw.get("control_start"), control_end=raw.get("control_end"),
+        control_model=raw.get("control_model"), debug=raw.get("debug"), context=context, pair=pair,
+        uploads=uploads,
     )
+    await check_controls_installed(client, opts)
 
     async def adapt(words: Optional[str]) -> str:
         return await rewrite_prompt(client, words or "") if opts["rewrite"] else (words or "")
@@ -923,29 +1151,48 @@ def _part_denoise(opts: dict[str, Any], words: dict[str, str]) -> float:
     return _denoise(opts, bool(PART_TYPES[opts["part"]] or words["desc"] or words["edit"]))
 
 
+def control_meta(opts: dict[str, Any], sent: Any = ()) -> dict[str, Any]:
+    """Control settings for the job result (control is [] and the rest None when no control was used)."""
+    used = bool(opts.get("control"))
+    return {"control": list(opts.get("control") or []), "control_strength": opts.get("control_strength"),
+            "control_start": opts.get("control_start"), "control_end": opts.get("control_end"),
+            "control_model": opts.get("control_model") if "lines" in (opts.get("control") or ()) else None,
+            "control_images": sorted(sent) if used else []}
+
+
+def control_panels(opts: dict[str, Any], uploads: Optional[dict[str, Any]] = None) -> list[tuple[str, Any]]:
+    """prepare_part's controls for a job: (kind, uploaded image or None) per lines / gray control."""
+    return [(k, (uploads or {}).get(k)) for k in opts.get("control") or () if k != "inpaint"]
+
+
 async def _render_part(
     client: Any, layer: Any, *, context: Any, repaint: Any, region: tuple[int, int, int, int],
-    subject: str, seed: int, denoise: float, opts: dict[str, Any],
+    subject: str, seed: int, denoise: float, opts: dict[str, Any], controls: Any = (), structure: Any = None,
 ) -> Any:
-    sheet, w, h, plan = prepare_part(layer, context=context, repaint=repaint, region=region)
+    sheet, w, h, plan = prepare_part(layer, context=context, repaint=repaint, region=region,
+                                     controls=controls, structure=structure)
+    specs = control_specs(opts)
     out = await _render(client, lambda n: build_still_graph(
         subject, seed=seed, width=w, height=h, character=opts["character"], hd=opts["quality"] == "hd",
         negative=with_negative(PART_NEGATIVE, opts), detail=False, source_image=n, denoise=denoise,
-        masked=True), sheet)
+        masked=True, controls=specs), sheet)
     return finish_part(out, plan)
 
 
 async def render_part_set(
     client: Any, layer: Any, followers: list[Any], *, context: Any, subject: str, seed: int,
-    denoise: float, opts: dict[str, Any],
+    denoise: float, opts: dict[str, Any], uploads: Optional[dict[str, Any]] = None,
 ) -> list[Any]:
     """Redraw the layer inside its own outline, then rebuild each follower (talking face, animation frame)
     from that result, redrawing only where its original differs from the layer's original with the same
-    seed and prompt, so swapping between them never flickers. Each comes back cut to its own transparency."""
+    seed and prompt, so swapping between them never flickers. Each comes back cut to its own transparency.
+    uploads: control images by control (control_uploads); followers derive theirs from their own original
+    unless one was uploaded."""
     from PIL import Image, ImageFilter
 
     region = part_region([layer, *followers])
-    kw = {"context": context, "region": region, "subject": subject, "seed": seed, "denoise": denoise, "opts": opts}
+    kw = {"context": context, "region": region, "subject": subject, "seed": seed, "denoise": denoise, "opts": opts,
+          "controls": control_panels(opts, uploads)}
     gen = await _render_part(client, layer, repaint=None, **kw)
     skin = skin_params(gen, layer, context if context is not None else layer) if opts.get("match_skin") else None
 
@@ -962,7 +1209,7 @@ async def render_part_set(
             continue
         src = Image.composite(frame.convert("RGB"), main, changed)
         src.putalpha(frame.getchannel("A"))
-        redrawn = post(await _render_part(client, src, repaint=changed, **kw), frame)
+        redrawn = post(await _render_part(client, src, repaint=changed, structure=frame, **kw), frame)
         blend = changed.filter(ImageFilter.GaussianBlur(1.5))
         out.append(with_alpha(Image.composite(redrawn, main, blend), frame))
     return out
@@ -983,8 +1230,9 @@ async def run_still_outputs(
     options = dict(options or {})
     if options.get("aspect") is None:
         options["aspect"] = aspect
+    sent = [k for k in CONTROL_UPLOADS if k in inputs]
     opts, words = await _still_setup(client, prompt, options, photo=image_bytes is not None,
-                                     context="context" in inputs, pair="pair" in inputs)
+                                     context="context" in inputs, pair="pair" in inputs, uploads=sent)
     seed = seed if seed is not None else new_seed()
     label, count = _label(opts["character"]), opts["count"]
     base = {"character": opts["character"], "quality": opts["quality"], "layout": opts["layout"]}
@@ -994,22 +1242,32 @@ async def run_still_outputs(
         layer = open_layer(image_bytes)
         context = open_layer(inputs["context"]) if "context" in inputs else None
         followers = [open_layer(inputs["pair"])] if "pair" in inputs else []
-        for other, what in [(context, "context"), *((f, "pair") for f in followers)]:
+        uploaded = {k: open_layer(inputs[k]) for k in sent}
+        others = [(context, "context"), *((f, "pair") for f in followers), *((v, k) for k, v in uploaded.items())]
+        for other, what in others:
             if other is not None and other.size != layer.size:
                 raise SagaError(f"The {what} image is {other.width}x{other.height} but the layer is "
                                 f"{layer.width}x{layer.height}; they must be the same size")
+        uploads = control_uploads(uploaded)
         subject, denoise = part_subject(opts, words), _part_denoise(opts, words)
         for i in range(count):
             images = await render_part_set(client, layer, followers, context=context, subject=subject,
-                                           seed=seed + i, denoise=denoise, opts=opts)
+                                           seed=seed + i, denoise=denoise, opts=opts, uploads=uploads)
             for role, img in zip(("main", "pair"), images):
                 meta = {**base, "kind": "part", "aspect": "photo", "width": img.width, "height": img.height,
                         "prompt_used": subject, "strength": opts["strength"], "denoise": denoise,
                         "changes": opts.get("changes"), "part": opts["part"], "transparent": img.mode == "RGBA",
                         "context": context is not None, "keep_lines": opts["keep_lines"],
                         "match_skin": opts["match_skin"], "negative": opts["negative"], "role": role,
-                        "variant": i + 1, "variants": count}
+                        "variant": i + 1, "variants": count, **control_meta(opts, sent)}
                 outputs.append((_png(img), "image/png", {"model_label": label, "seed_used": seed + i, "saga": meta}))
+        if opts["debug"]:
+            sheet, w, h, _ = prepare_part(layer, context=context, region=part_region([layer, *followers]),
+                                          controls=control_panels(opts, uploads))
+            meta = {**base, "kind": "debug_sheet", "aspect": "photo", "width": w * (2 + len(control_panels(opts))),
+                    "height": h, "panels": ["picture", "mask", *(k for k, _ in control_panels(opts))],
+                    "prompt_used": subject, "denoise": denoise, "role": "debug", **control_meta(opts, sent)}
+            outputs.append((sheet, "image/png", {"model_label": label, "seed_used": seed, "saga": meta}))
         return outputs
 
     photo, width, height = (prepare_photo(image_bytes) if image_bytes is not None
@@ -1075,7 +1333,9 @@ async def run_batch(
     (GPU or tunnel down) it stops and returns what finished."""
     files, manifest = unpack_inputs(bundle)
     items = check_batch(files, manifest)["items"]
-    opts, words = await _still_setup(client, prompt, {**(options or {}), "layout": "part", "count": 1}, photo=True)
+    sent = sorted({k for item in items for k in CONTROL_UPLOADS if k in item})
+    opts, words = await _still_setup(client, prompt, {**(options or {}), "layout": "part", "count": 1}, photo=True,
+                                     uploads=sent)
     seed = seed if seed is not None else new_seed()
     contexts: dict[str, Any] = {}
     report: list[dict[str, Any]] = []
@@ -1090,10 +1350,11 @@ async def run_batch(
                 ctx_name = item.get("context")
                 if ctx_name and ctx_name not in contexts:
                     contexts[ctx_name] = open_layer(files[ctx_name])
+                uploads = control_uploads({k: open_layer(files[item[k]]) for k in CONTROL_UPLOADS if k in item})
                 images = await render_part_set(
                     client, open_layer(files[item["image"]]), [open_layer(files[n]) for n in item["pair"]],
                     context=contexts.get(ctx_name) if ctx_name else None, subject=subject, seed=seed,
-                    denoise=denoise, opts=item_opts)
+                    denoise=denoise, opts=item_opts, uploads=uploads)
                 for name, img in zip(names, images):
                     zf.writestr(name, _png(img))
                 report.append({"image": item["image"], "ok": True, "outputs": names, "prompt_used": subject})
@@ -1115,11 +1376,13 @@ async def run_batch(
         summary = {"prompt_used": shared_subject, "seed_used": seed, "denoise": shared_denoise,
                    "strength": opts["strength"], "quality": opts["quality"], "part": opts["part"],
                    "keep_lines": opts["keep_lines"], "match_skin": opts["match_skin"], "negative": opts["negative"],
+                   **control_meta(opts, sent),
                    "done": done, "failed": len(report) - done, "total": len(items), "stopped": stopped,
                    "items": report}
         zf.writestr("report.json", json.dumps(summary, indent=1))
     meta = {key: summary[key] for key in ("prompt_used", "denoise", "strength", "quality", "part", "keep_lines",
-                                          "match_skin", "negative", "done", "failed", "total", "stopped")}
+                                          "match_skin", "negative", *control_meta(opts), "done", "failed",
+                                          "total", "stopped")}
     meta.update(kind="batch", layout="part", character=opts["character"], changes=opts.get("changes"))
     return buf.getvalue(), "application/zip", {"model_label": _label(opts["character"]), "seed_used": seed,
                                                "saga": meta}

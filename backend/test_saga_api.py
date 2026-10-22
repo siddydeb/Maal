@@ -63,6 +63,23 @@ class ExecuteTests(unittest.TestCase):
                          [("g1", 5, "main"), ("g2", 5, "pair"), ("g3", 6, "main"), ("g4", 6, "pair")])
         self.assertEqual(stored[3]["meta"]["saga"]["variant"], 2)
 
+    def test_control_is_reported(self):
+        async def store(**kw):
+            return {"id": "g1", "kind": kw["kind"], "prompt": "", "model": "m", "content_type": kw["content_type"],
+                    "size_bytes": 3, "created_at": "now"}
+
+        outs = _outputs(["main"])
+        outs[0][2]["saga"].update(control=["inpaint", "gray"], control_strength={"inpaint": 1.0, "gray": 0.8},
+                                  control_start=0.0, control_end=0.9)
+        with patch.object(main, "_comfy", return_value=_Comfy()), \
+                patch.object(main.db, "store_media", side_effect=store), \
+                patch.object(saga, "run_still_outputs", AsyncMock(return_value=outs)):
+            payload = asyncio.run(main._execute_generation(
+                mode="saga", prompt="", prompt_en="", image_bytes=_png(), negative=None, seed=5,
+                resolved={"original": ""}, options={"layout": "part", "photo": True}))
+        self.assertEqual((payload["control"], payload["control_strength"], payload["control_start"],
+                          payload["control_end"]), (["inpaint", "gray"], {"inpaint": 1.0, "gray": 0.8}, 0.0, 0.9))
+
     def test_batch_zip_is_not_a_library_image(self):
         stored = []
 
@@ -161,6 +178,65 @@ class EndpointTests(unittest.TestCase):
         self.assertEqual(r.status_code, 200, r.text)
         job = self.created[0]
         self.assertEqual((job["prompt_english"], job["options"]["negative"]), ("navy blue shirt", "stubble, beard"))
+
+    def test_part_control_fields(self):
+        for path, field in (("/api/jobs", "image"), ("/api/saga", "photo")):
+            self.created.clear()
+            r = self.client.post(path, data={"mode": "saga", "layout": "part", "control": "inpaint,lines",
+                                             "control_strength": "inpaint:1.0,lines:0.8", "control_end": "0.9",
+                                             "denoise": "0.85", "debug": "1"},
+                                 files={field: ("f.png", _png()), "control_image": ("c.png", _png())})
+            self.assertEqual(r.status_code, 200, r.text)
+            opts = self.created[0]["options"]
+            self.assertEqual((opts["control"], opts["control_strength"], opts["control_end"], opts["denoise"],
+                              opts["debug"]), (["inpaint", "lines"], {"inpaint": 1.0, "lines": 0.8}, 0.9, 0.85, True))
+            files, _ = saga.unpack_inputs(self.created[0]["image_bytes"])
+            self.assertEqual(sorted(files), ["control_image", "image"])
+
+    def test_part_control_rejections(self):
+        cases = [
+            ({"layout": "part", "control": "lines"}, {"control_image": ("c.png", _png((32, 32)))}, "same size"),
+            ({"layout": "part", "control": "inpaint"}, {"control_image": ("c.png", _png())}, "add it to control"),
+            ({"layout": "part", "control": "inpaint", "denoise": "0.97"}, {}, "0.95"),
+            ({"layout": "part", "control": "edges"}, {}, "Unknown control"),
+            ({"layout": "scene", "control": "gray"}, {}, "Part mode"),
+        ]
+        for data, extra, needle in cases:
+            with self.subTest(data=data):
+                r = self.client.post("/api/jobs", data={"mode": "saga", **data},
+                                     files={"image": ("f.png", _png()), **extra})
+                self.assertEqual(r.status_code, 400, r.text)
+                self.assertIn(needle, r.json()["detail"])
+
+    def test_batch_control(self):
+        manifest = {"items": [{"image": "f.png", "control_image_lines": "f_lines.png"}, {"image": "g.png"}]}
+        files = [("files", (n, _png())) for n in ("f.png", "f_lines.png", "g.png")]
+        r = self.client.post("/api/saga/batch", data={"manifest": json.dumps(manifest), "control": "inpaint,lines",
+                                                      "control_strength": "0.9", "denoise": "0.8"}, files=files)
+        self.assertEqual(r.status_code, 200, r.text)
+        opts = self.created[0]["options"]
+        self.assertEqual((opts["control"], opts["control_strength"]), (["inpaint", "lines"], {"inpaint": 0.9, "lines": 0.9}))
+        stored, _ = saga.unpack_inputs(self.created[0]["image_bytes"])
+        self.assertIn("f_lines.png", stored)
+        bad = [("files", (n, _png((32, 32) if n == "f_lines.png" else (64, 48)))) for n in ("f.png", "f_lines.png", "g.png")]
+        r = self.client.post("/api/saga/batch", data={"manifest": json.dumps(manifest), "control": "lines"}, files=bad)
+        self.assertEqual(r.status_code, 400)
+        r = self.client.post("/api/saga/batch", data={"manifest": json.dumps(manifest), "control": "inpaint"}, files=files)
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("add it to control", r.json()["detail"])
+
+    def test_config_lists_installed_controls(self):
+        class _Gpu(_Comfy):
+            async def lora_names(self):
+                return set()
+
+            async def node_choices(self, node, field):
+                return {saga.LLLITE_INPAINT, saga.LLLITE_ANY}
+
+        with patch.object(main, "_comfy", return_value=_Gpu()):
+            r = self.client.get("/api/saga/config")
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual((r.json()["controls"], r.json()["control_denoise_max"]), (["inpaint", "lines", "gray"], 0.95))
 
     def test_batch_bad_manifest(self):
         r = self.client.post("/api/saga/batch", data={"manifest": json.dumps({"items": [{"image": "x.png"}]})},
