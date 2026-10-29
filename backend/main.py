@@ -250,6 +250,9 @@ def _dispatcher_tick() -> None:
             if not job or job.get("status") != "queued":
                 print(f"[wan] FCFS skip job={job_id} status={job and job.get('status')}")
                 return
+            if not db.claim_queued_job_sync(job_id):
+                print(f"[wan] FCFS skip job={job_id} claimed by another API instance")
+                return
             await _resume_persisted_job(job)
 
         return _coro

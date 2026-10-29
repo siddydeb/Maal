@@ -40,14 +40,31 @@ OVERLAY_FILES = (
 )
 
 
-def _load_render_token() -> str:
+def _load_tokens() -> dict[str, str]:
     if not TOKENS_FILE.is_file():
         raise SystemExit(f"Missing {TOKENS_FILE.name}")
-    for line in TOKENS_FILE.read_text(encoding="utf-8", errors="replace").splitlines():
+    out: dict[str, str] = {}
+    for line in TOKENS_FILE.read_text(encoding="utf-8-sig", errors="replace").splitlines():
         line = line.strip()
-        if line.lower().startswith("render=") and "=" in line:
-            return line.split("=", 1)[1].strip()
-    raise SystemExit("tokens&cmd missing render=")
+        if "=" in line and not line.startswith(("#", ";")):
+            k, v = line.split("=", 1)
+            out[k.strip().lower()] = v.strip()
+    return out
+
+
+def _load_render_token() -> str:
+    tok = _load_tokens().get("render")
+    if not tok:
+        raise SystemExit("tokens&cmd missing render=")
+    return tok
+
+
+def _backup_service() -> tuple[str, str] | None:
+    """(token, service id) of the failover Wan API on Render account 2, if configured."""
+    t = _load_tokens()
+    if t.get("render2") and t.get("render2_service"):
+        return t["render2"], t["render2_service"]
+    return None
 
 
 def _http_json(
@@ -107,11 +124,11 @@ def list_secret_names(token: str) -> list[str]:
     return names
 
 
-def put_secret_file(token: str, name: str, content: str) -> int:
+def put_secret_file(token: str, name: str, content: str, service_id: str = SERVICE_ID) -> int:
     quoted = urllib.parse.quote(name, safe="")
     code, payload = _http_json(
         "PUT",
-        f"{RENDER_API}/services/{SERVICE_ID}/secret-files/{quoted}",
+        f"{RENDER_API}/services/{service_id}/secret-files/{quoted}",
         token=token,
         body={"content": content},
     )
@@ -218,6 +235,14 @@ def main() -> int:
         code = put_secret_file(token, name, text)
         if code not in (200, 201):
             failed += 1
+    backup = _backup_service()
+    if backup:
+        # Backup stays suspended; it picks these up on its next deploy (failover).
+        print(f"Uploading overlay files to backup {backup[1]}…")
+        for name in names:
+            text = (PRIVATE_DIR / name).read_text(encoding="utf-8")
+            if put_secret_file(backup[0], name, text, backup[1]) not in (200, 201):
+                failed += 1
     if failed:
         raise SystemExit(f"{failed} overlay file(s) failed to upload")
 

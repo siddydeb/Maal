@@ -1,10 +1,85 @@
 import { clearSession, getAccessToken, getOwnerId } from "./auth";
 
-const API_BASE = (import.meta.env.VITE_API_URL || "").replace(/\/$/, "");
+// Primary API + optional failover API on a second Render account. Only one runs at a
+// time (the GPU-PC watchdog suspends the other), so use whichever answers.
+const API_BASES = [import.meta.env.VITE_API_URL, import.meta.env.VITE_API_URL_2]
+  .map((b) => (b || "").replace(/\/$/, ""))
+  .filter((b, i, all) => i === 0 || (b && !all.slice(0, i).includes(b)));
+const API_BASE_KEY = "wan_api_base";
+
+function storedBase() {
+  try {
+    const b = localStorage.getItem(API_BASE_KEY);
+    return API_BASES.includes(b) ? b : null;
+  } catch {
+    return null;
+  }
+}
+
+let apiBase = storedBase() ?? API_BASES[0];
+let switching = null;
 
 function url(path) {
   if (path.startsWith("http")) return path;
-  return `${API_BASE}${path}`;
+  return `${apiBase}${path}`;
+}
+
+async function probe(base) {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 60000); // free Render instances take ~50s to wake
+  try {
+    const res = await nativeFetch(`${base}/api/healthz`, { cache: "no-store", signal: ctl.signal });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return base;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Find the API that is up now; null if none answers. */
+function switchBase() {
+  if (!switching) {
+    switching = Promise.any(API_BASES.map(probe))
+      .then((base) => {
+        if (base !== apiBase) console.info(`[wan] API switched to ${base}`);
+        apiBase = base;
+        try {
+          localStorage.setItem(API_BASE_KEY, base);
+        } catch {
+          /* private mode */
+        }
+        return base;
+      })
+      .catch(() => null)
+      .finally(() => {
+        switching = null;
+      });
+  }
+  return switching;
+}
+
+const nativeFetch = (...args) => globalThis.fetch(...args);
+
+// Module-local fetch: on a dead/suspended API (network/CORS error or Render edge 502-504),
+// find the live one and retry once there.
+async function fetch(input, init) {
+  const target = typeof input === "string" ? input : null;
+  const from = API_BASES.length > 1 && target ? API_BASES.find((b) => target.startsWith(b)) : null;
+  if (!from) return nativeFetch(input, init);
+  let res;
+  try {
+    res = await nativeFetch(input, init);
+    if (![502, 503, 504].includes(res.status) || res.headers.get("content-type")?.includes("json")) {
+      return res;
+    }
+  } catch (err) {
+    if (err?.name === "AbortError") throw err;
+    if (!(await switchBase())) throw err;
+    return nativeFetch(apiBase + target.slice(from.length), init);
+  }
+  const base = await switchBase();
+  if (!base || base === from) return res;
+  return nativeFetch(base + target.slice(from.length), init);
 }
 
 function authHeaders(extra = {}) {

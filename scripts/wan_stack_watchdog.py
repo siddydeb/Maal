@@ -104,6 +104,11 @@ RUNTIME_KEYS = {
     "scapper_url",
     "scapper_url_pushed",
     "scapper_render_service",
+    # Failover Wan API on a second Render account (see ensure_wan_failover)
+    "render2",
+    "RENDER2",
+    "render2_service",
+    "render2_url",
 }
 COMFY_ROOT = Path(r"E:\Comfy-Desktop\ComfyUI-Installs\Khelukhiladi\ComfyUI")
 PROWLER_ROOT = Path(r"D:\prowler")
@@ -115,7 +120,14 @@ SCAPPER_TOKENS = SCAPPER_ROOT / "tokens&cmd"
 NAMED_TUNNEL_CONFIG = SCAPPER_ROOT / "deploy" / "tunnel" / "config.yml"
 CLOUDFLARED = Path(r"C:\Program Files (x86)\cloudflared\cloudflared.exe")
 RENDER_API = "https://api.render.com/v1"
-SERVICE_ID = "srv-d9ot8spt0dsc73bqjv0g"
+PRIMARY_SERVICE_ID = "srv-d9ot8spt0dsc73bqjv0g"
+PRIMARY_API_URL = "https://wan-studio-api.onrender.com"
+# Active Wan API (primary or failover backup); heal_once re-points these each pass.
+SERVICE_ID = PRIMARY_SERVICE_ID
+WAN_API = PRIMARY_API_URL
+WAN_ACTIVE_STATE = RUNTIME / "wan_active.txt"
+# Consecutive failed health passes (~45s apart) before switching Wan API accounts.
+FAILOVER_STRIKES = 4
 URL_RE = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com", re.I)
 # Back off creating new quick tunnels after Cloudflare 429s
 _QUICK_TUNNEL_COOLDOWN_UNTIL = 0.0
@@ -546,9 +558,9 @@ def render_headers(token: str) -> dict[str, str]:
     }
 
 
-def list_env(token: str) -> list[dict]:
+def list_env(token: str, service_id: str | None = None) -> list[dict]:
     req = urllib.request.Request(
-        f"{RENDER_API}/services/{SERVICE_ID}/env-vars?limit=100",
+        f"{RENDER_API}/services/{service_id or SERVICE_ID}/env-vars?limit=100",
         headers=render_headers(token),
         method="GET",
     )
@@ -568,12 +580,20 @@ def list_env(token: str) -> list[dict]:
     return out
 
 
-def set_env_and_deploy(token: str, updates: dict[str, str]) -> None:
+def set_env_and_deploy(
+    token: str,
+    updates: dict[str, str],
+    *,
+    service_id: str | None = None,
+    deploy: bool = True,
+) -> bool:
     """Update only the given keys (safe single-var PUTs) then deploy.
 
     Never bulk-replace all env vars — Render often returns blank secret values
     on list, and a full PUT would wipe Mongo/Cloudinary/etc.
+    Returns True if any value changed.
     """
+    sid = service_id or SERVICE_ID
     changed = False
     for key, value in updates.items():
         value = (value or "").strip()
@@ -581,14 +601,14 @@ def set_env_and_deploy(token: str, updates: dict[str, str]) -> None:
             continue
         # Skip no-op when we can read the current public value
         try:
-            current = {str(i["key"]): i for i in list_env(token)}
+            current = {str(i["key"]): i for i in list_env(token, sid)}
             prev = (current.get(key) or {}).get("value")
             if prev == value:
                 continue
         except Exception:
             pass
         req = urllib.request.Request(
-            f"{RENDER_API}/services/{SERVICE_ID}/env-vars/{key}",
+            f"{RENDER_API}/services/{sid}/env-vars/{key}",
             data=json.dumps({"value": value}).encode(),
             headers=render_headers(token),
             method="PUT",
@@ -601,10 +621,10 @@ def set_env_and_deploy(token: str, updates: dict[str, str]) -> None:
             log(f"Render env {key} -> (set)")
         else:
             log(f"Render env {key} -> {value}")
-    if not changed:
-        return
+    if not changed or not deploy:
+        return changed
     dep = urllib.request.Request(
-        f"{RENDER_API}/services/{SERVICE_ID}/deploys",
+        f"{RENDER_API}/services/{sid}/deploys",
         data=json.dumps({"clearCache": "do_not_clear"}).encode(),
         headers=render_headers(token),
         method="POST",
@@ -616,13 +636,156 @@ def set_env_and_deploy(token: str, updates: dict[str, str]) -> None:
         # Private GitHub repo → Render deploy 404; restart still reloads env vars.
         log(f"Render deploy failed ({exc}); trying service restart…")
         restart = urllib.request.Request(
-            f"{RENDER_API}/services/{SERVICE_ID}/restart",
+            f"{RENDER_API}/services/{sid}/restart",
             data=b"",
             headers=render_headers(token),
             method="POST",
         )
         with urllib.request.urlopen(restart, timeout=90) as r:
             log(f"Render restart triggered HTTP {r.status}")
+    return changed
+
+
+def render_api(token: str, method: str, path: str, body: object | None = None) -> object:
+    data = json.dumps(body).encode() if body is not None else (b"" if method == "POST" else None)
+    req = urllib.request.Request(
+        f"{RENDER_API}{path}", data=data, headers=render_headers(token), method=method
+    )
+    with urllib.request.urlopen(req, timeout=90) as r:
+        raw = r.read()
+    return json.loads(raw) if raw else None
+
+
+def wan_backends(tokens: dict[str, str]) -> list[dict[str, str]]:
+    """Primary Wan API (Render account 1) plus the optional backup on account 2."""
+    out = [
+        {
+            "name": "primary",
+            "token": (tokens.get("render") or "").strip(),
+            "service": PRIMARY_SERVICE_ID,
+            "url": PRIMARY_API_URL,
+        }
+    ]
+    tok2 = (tokens.get("render2") or tokens.get("RENDER2") or "").strip()
+    svc2 = (tokens.get("render2_service") or "").strip()
+    url2 = (tokens.get("render2_url") or "").strip().rstrip("/")
+    if tok2 and svc2 and url2:
+        out.append({"name": "backup", "token": tok2, "service": svc2, "url": url2})
+    return out
+
+
+def _read_active_name() -> str:
+    try:
+        return WAN_ACTIVE_STATE.read_text(encoding="utf-8").strip() or "primary"
+    except OSError:
+        return "primary"
+
+
+def _wan_suspended(b: dict[str, str]) -> bool | None:
+    """True/False from the Render API; None when the API can't be asked."""
+    try:
+        svc = render_api(b["token"], "GET", f"/services/{b['service']}")
+    except Exception as exc:
+        log(f"Render status {b['name']} failed: {exc}")
+        return None
+    return isinstance(svc, dict) and str(svc.get("suspended")) == "suspended"
+
+
+def _gpu_env(tokens: dict[str, str]) -> dict[str, str]:
+    """Current Comfy / gpu_agent public URLs, for pointing a freshly resumed API at this PC."""
+    if named_tunnel_mode(tokens):
+        comfy = (tokens.get("gpu_comfy_url") or "").strip()
+        agent = (tokens.get("gpu_agent") or "").strip()
+    else:
+        def _state(port: int) -> str:
+            try:
+                return (RUNTIME / f"tunnel_{port}.url").read_text(encoding="utf-8").strip()
+            except OSError:
+                return ""
+
+        comfy = _state(8188)
+        agent = _state(8799) or (tokens.get("gpu_agent") or "").strip()
+    out = {"COMFYUI_URL": comfy.rstrip("/")}
+    if agent and tokens.get("gpu_agent_secret"):
+        out["GPU_AGENT_URL"] = agent.rstrip("/")
+        out["GPU_AGENT_SECRET"] = tokens["gpu_agent_secret"]
+    return out
+
+
+_wan_strikes = 0
+_failover_cooldown_until = 0.0
+
+
+def _switch_wan(frm: dict[str, str], to: dict[str, str], tokens: dict[str, str]) -> bool:
+    """Suspend frm first (never two APIs on one Mongo/Comfy), then resume + deploy to."""
+    log(f"Wan API failover: {frm['name']} -> {to['name']} ({to['url']})")
+    try:
+        render_api(frm["token"], "POST", f"/services/{frm['service']}/suspend")
+        log(f"suspended {frm['name']}")
+    except Exception as exc:
+        # Already suspended by Render (free hours used up) is the usual reason.
+        log(f"suspend {frm['name']} failed: {exc}")
+    try:
+        set_env_and_deploy(to["token"], _gpu_env(tokens), service_id=to["service"], deploy=False)
+        render_api(to["token"], "POST", f"/services/{to['service']}/resume")
+        # The backup deploys from the public repo URL (no GitHub hook) — pull latest main.
+        render_api(to["token"], "POST", f"/services/{to['service']}/deploys", {"clearCache": "do_not_clear"})
+    except Exception as exc:
+        log(f"resume {to['name']} failed: {exc} — resuming {frm['name']} again")
+        try:
+            render_api(frm["token"], "POST", f"/services/{frm['service']}/resume")
+        except Exception as exc2:
+            log(f"resume {frm['name']} failed too: {exc2}")
+        return False
+    WAN_ACTIVE_STATE.parent.mkdir(parents=True, exist_ok=True)
+    WAN_ACTIVE_STATE.write_text(to["name"] + "\n", encoding="utf-8")
+    for _ in range(40):
+        time.sleep(15)
+        if http_ok(f"{to['url']}/api/healthz", timeout=20):
+            log(f"Wan API {to['name']} is up")
+            return True
+    log(f"WARNING: {to['name']} resumed but not healthy yet (build still running?)")
+    return True
+
+
+def ensure_wan_failover(tokens: dict[str, str]) -> dict[str, str]:
+    """Return the Wan API to use; switch Render accounts when the active one is down.
+
+    Exactly one backend runs: the standby stays suspended (its startup clears the
+    Comfy queue and re-queues running jobs, which would kill the active one's work).
+    """
+    global _wan_strikes, _failover_cooldown_until
+    backends = wan_backends(tokens)
+    by_name = {b["name"]: b for b in backends}
+    active = by_name.get(_read_active_name(), backends[0])
+    if len(backends) < 2:
+        return active
+    standby = next(b for b in backends if b is not active)
+
+    suspended = _wan_suspended(active)
+    if not suspended and http_ok(f"{active['url']}/api/healthz", timeout=30):
+        _wan_strikes = 0
+        if _wan_suspended(standby) is False:
+            log(f"standby {standby['name']} is running alongside {active['name']} — suspending it")
+            try:
+                render_api(standby["token"], "POST", f"/services/{standby['service']}/suspend")
+            except Exception as exc:
+                log(f"suspend {standby['name']} failed: {exc}")
+        return active
+
+    _wan_strikes = FAILOVER_STRIKES if suspended else _wan_strikes + 1
+    log(
+        f"Wan API {active['name']} "
+        f"{'suspended' if suspended else 'not healthy'} ({_wan_strikes}/{FAILOVER_STRIKES})"
+    )
+    if _wan_strikes < FAILOVER_STRIKES or time.time() < _failover_cooldown_until:
+        return active
+    _wan_strikes = 0
+    if _switch_wan(active, standby, tokens):
+        return standby
+    # Both accounts unusable (e.g. both out of free hours) — retry later.
+    _failover_cooldown_until = time.time() + 15 * 60
+    return active
 
 
 def ensure_tunnel(
@@ -642,11 +805,9 @@ def ensure_tunnel(
 
     api_url = ""
     api_comfy_ok = False
-    if local_port == 8188 and http_ok("https://wan-studio-api.onrender.com/api/health", timeout=20):
+    if local_port == 8188 and http_ok(f"{WAN_API}/api/health", timeout=20):
         try:
-            with urllib.request.urlopen(
-                "https://wan-studio-api.onrender.com/api/health", timeout=20
-            ) as r:
+            with urllib.request.urlopen(f"{WAN_API}/api/health", timeout=20) as r:
                 health = json.load(r)
             api_comfy_ok = bool(health.get("comfyui"))
             api_url = str(health.get("comfyui_url") or "").rstrip("/")
@@ -704,7 +865,7 @@ def ensure_tunnel(
             state_path.parent.mkdir(parents=True, exist_ok=True)
             state_path.write_text(known + "\n", encoding="utf-8")
 
-    render_tok = (tokens.get("render") or "").strip()
+    render_tok = (tokens.get("_wan_render") or tokens.get("render") or "").strip()
     if not render_tok or not known or not (render_env_key or "").strip():
         if local_port == 8010 and known:
             upsert_token("prowler_url", known)
@@ -901,7 +1062,21 @@ def _step(name: str, fn, *args, **kwargs) -> None:
         log(f"{name} failed: {exc}")
 
 
+def _select_wan(tokens: dict[str, str]) -> None:
+    """Point SERVICE_ID / WAN_API / Render token at the active Wan API (fails over if needed)."""
+    global SERVICE_ID, WAN_API
+    try:
+        active = ensure_wan_failover(tokens)
+    except Exception as exc:
+        log(f"wan failover check failed: {exc}")
+        active = wan_backends(tokens)[0]
+    SERVICE_ID = active["service"]
+    WAN_API = active["url"]
+    tokens["_wan_render"] = active["token"]
+
+
 def heal_once(tokens: dict[str, str], procs: dict[str, subprocess.Popen]) -> None:
+    _select_wan(tokens)
     _step("comfy", ensure_comfy, tokens)
     _step("gpu_agent", ensure_gpu_agent, tokens)
     _step("prowler", ensure_prowler, tokens)
@@ -914,7 +1089,7 @@ def heal_once(tokens: dict[str, str], procs: dict[str, subprocess.Popen]) -> Non
         # Stable URLs already in tokens&cmd from setup_named_tunnel.ps1
         _push_scapper_to_render(tokens)
         # Keep Wan Render envs pointed at stable comfy/agent hostnames
-        render_tok = (tokens.get("render") or "").strip()
+        render_tok = (tokens.get("_wan_render") or tokens.get("render") or "").strip()
         comfy_u = (tokens.get("gpu_comfy_url") or "").strip().rstrip("/")
         agent_u = (tokens.get("gpu_agent") or "").strip().rstrip("/")
         if render_tok and comfy_u:

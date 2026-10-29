@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 import re
 import threading
+import uuid as _uuid
 
 from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase, AsyncIOMotorGridFSBucket
@@ -72,11 +73,46 @@ def peek_next_queued_job_sync() -> Optional[dict[str, Any]]:
     doc = _sync_jobs().find_one(
         {
             "status": "queued",
-            "$or": [{"input_gridfs_id": {"$ne": None}}, {"mode": {"$in": ["t2i", "saga"]}}],
+            "$and": [
+                {"$or": [{"input_gridfs_id": {"$ne": None}}, {"mode": {"$in": ["t2i", "saga"]}}]},
+                _claimable_filter(datetime.now(timezone.utc)),
+            ],
         },
         sort=[("created_at", 1)],
     )
     return _serialize_job(doc) if doc else None
+
+
+# Two Render services (primary + failover backup) share this Mongo. Only the
+# process whose id lands in claimed_by may start a queued job.
+INSTANCE_ID = _uuid.uuid4().hex
+
+
+_CLAIM_TTL = timedelta(minutes=10)
+
+
+def _claimable_filter(now: datetime) -> dict[str, Any]:
+    # A claim that never reached "running" in 10 min belongs to a process that died.
+    return {
+        "$or": [
+            {"claimed_by": {"$in": [None, INSTANCE_ID]}},
+            {"claimed_at": {"$lt": now - _CLAIM_TTL}},
+        ]
+    }
+
+
+def claim_queued_job_sync(job_id: str) -> bool:
+    """Atomically claim a queued job for this API process. False if another process has it."""
+    try:
+        oid = ObjectId(job_id)
+    except Exception:
+        return False
+    now = datetime.now(timezone.utc)
+    result = _sync_jobs().update_one(
+        {"_id": oid, "status": "queued", **_claimable_filter(now)},
+        {"$set": {"claimed_by": INSTANCE_ID, "claimed_at": now, "updated_at": now}},
+    )
+    return result.matched_count == 1
 
 
 def job_is_active_sync(job_id: str) -> bool:
@@ -1080,6 +1116,7 @@ async def reclaim_active_jobs_on_startup() -> list[dict[str, Any]]:
                     "status": "queued",
                     "error": None,
                     "started_at": None,
+                    "claimed_by": None,
                     "updated_at": now,
                 },
                 "$inc": {"resume_count": 1},
