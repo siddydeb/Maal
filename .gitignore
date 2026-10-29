@@ -32,7 +32,8 @@ frontend/.env.local
 frontend/.vercel/
 .vercel/
 deploy-render-service.json
-# private/ — temporarily tracked for cross-PC sync; re-gitignore when done
+# Runtime overlays — Render secret files (scripts/sync_runtime_overlay.py), never git
+private/
 *.private.json
 presets.private.json
 review_bins.private.json
