@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { useVisibleInterval } from "./useVisibleInterval";
 import {
   authedUrl,
   cancelTraining,
@@ -60,13 +61,12 @@ export default function TrainGirl() {
   }, []);
 
   useEffect(() => {
-    refresh();
     listTrainHeroes()
       .then((d) => setHeroes(Array.isArray(d.items) ? d.items : []))
       .catch(() => {});
-    const t = setInterval(refresh, 10000);
-    return () => clearInterval(t);
-  }, [refresh]);
+  }, []);
+
+  useVisibleInterval(refresh, 10000);
 
   async function run(fn, okMsg) {
     setBusy(true);

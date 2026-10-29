@@ -115,6 +115,11 @@ def claim_queued_job_sync(job_id: str) -> bool:
     return result.matched_count == 1
 
 
+def has_active_jobs_sync() -> bool:
+    """Any job still queued or running (anyone's)."""
+    return _sync_jobs().count_documents({"status": {"$in": ["queued", "running"]}}, limit=1) > 0
+
+
 def job_is_active_sync(job_id: str) -> bool:
     try:
         oid = ObjectId(job_id)

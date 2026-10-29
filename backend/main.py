@@ -9,7 +9,9 @@ import asyncio
 import gc
 import io
 import json
+import os
 import threading
+import time
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -214,6 +216,28 @@ def _dispatcher_loop() -> None:
             print(f"[wan] FCFS dispatcher tick failed: {exc}")
 
 
+_KEEPALIVE_SEC = 240
+
+
+def _keepalive_loop(base: str) -> None:
+    """Free Render instances sleep after 15 min without inbound HTTP. While jobs are queued or
+    running, request our own public URL so a closed browser tab can't let the worker die
+    mid-job. When idle, send nothing so the instance can sleep (no instance-hours used)."""
+    while True:
+        time.sleep(_KEEPALIVE_SEC)
+        try:
+            if db.has_active_jobs_sync():
+                httpx.get(f"{base}/api/healthz", timeout=30)
+        except Exception as exc:
+            print(f"[wan] keepalive ping failed: {exc}")
+
+
+def _start_keepalive() -> None:
+    base = (os.environ.get("RENDER_EXTERNAL_URL") or "").rstrip("/")
+    if base:
+        threading.Thread(target=_keepalive_loop, args=(base,), name="wan-keepalive", daemon=True).start()
+
+
 def _dispatcher_tick() -> None:
     """Start at most one queued job (oldest first). Load payload from GridFS."""
     global _active_worker_job_id
@@ -296,6 +320,7 @@ async def lifespan(_app: FastAPI):
         _kick_job_dispatcher()
     except Exception as exc:
         print(f"[wan] job resume on startup failed: {exc}")
+    _start_keepalive()
     settings = get_settings()
     if settings.zero_residue and settings.comfyui_dir:
         try:

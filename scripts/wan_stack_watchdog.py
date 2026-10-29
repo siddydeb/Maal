@@ -126,8 +126,9 @@ PRIMARY_API_URL = "https://wan-studio-api.onrender.com"
 SERVICE_ID = PRIMARY_SERVICE_ID
 WAN_API = PRIMARY_API_URL
 WAN_ACTIVE_STATE = RUNTIME / "wan_active.txt"
-# Consecutive failed health passes (~45s apart) before switching Wan API accounts.
-FAILOVER_STRIKES = 4
+# Consecutive passes (~45s apart) the active Wan API must read as suspended before
+# switching accounts — rides out a manual suspend/resume or a Render API blip.
+FAILOVER_STRIKES = 2
 URL_RE = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com", re.I)
 # Back off creating new quick tunnels after Cloudflare 429s
 _QUICK_TUNNEL_COOLDOWN_UNTIL = 0.0
@@ -656,6 +657,31 @@ def render_api(token: str, method: str, path: str, body: object | None = None) -
     return json.loads(raw) if raw else None
 
 
+_comfy_env_cache: tuple[str, str, float] = ("", "", 0.0)  # (service id, COMFYUI_URL, fetched at)
+
+
+def _invalidate_comfy_env_cache() -> None:
+    global _comfy_env_cache
+    _comfy_env_cache = ("", "", 0.0)
+
+
+def _render_comfy_url(tokens: dict[str, str]) -> str:
+    """Active Wan API's COMFYUI_URL from the Render API (cached 5 min; never wakes the service)."""
+    global _comfy_env_cache
+    sid, url, at = _comfy_env_cache
+    if sid == SERVICE_ID and time.time() - at < 300:
+        return url
+    tok = (tokens.get("_wan_render") or tokens.get("render") or "").strip()
+    try:
+        env = {str(i["key"]): str(i.get("value") or "") for i in list_env(tok, SERVICE_ID)}
+    except Exception as exc:
+        log(f"Render env read failed: {exc}")
+        return url if sid == SERVICE_ID else ""
+    url = env.get("COMFYUI_URL", "").rstrip("/")
+    _comfy_env_cache = (SERVICE_ID, url, time.time())
+    return url
+
+
 def wan_backends(tokens: dict[str, str]) -> list[dict[str, str]]:
     """Primary Wan API (Render account 1) plus the optional backup on account 2."""
     out = [
@@ -762,8 +788,10 @@ def ensure_wan_failover(tokens: dict[str, str]) -> dict[str, str]:
         return active
     standby = next(b for b in backends if b is not active)
 
+    # Only the Render API decides (out of free hours = suspended). No HTTP probe of the
+    # service: that would keep it from sleeping. Render restarts a crashed instance itself.
     suspended = _wan_suspended(active)
-    if not suspended and http_ok(f"{active['url']}/api/healthz", timeout=30):
+    if not suspended:
         _wan_strikes = 0
         if _wan_suspended(standby) is False:
             log(f"standby {standby['name']} is running alongside {active['name']} — suspending it")
@@ -773,11 +801,8 @@ def ensure_wan_failover(tokens: dict[str, str]) -> dict[str, str]:
                 log(f"suspend {standby['name']} failed: {exc}")
         return active
 
-    _wan_strikes = FAILOVER_STRIKES if suspended else _wan_strikes + 1
-    log(
-        f"Wan API {active['name']} "
-        f"{'suspended' if suspended else 'not healthy'} ({_wan_strikes}/{FAILOVER_STRIKES})"
-    )
+    _wan_strikes += 1
+    log(f"Wan API {active['name']} suspended ({_wan_strikes}/{FAILOVER_STRIKES})")
     if _wan_strikes < FAILOVER_STRIKES or time.time() < _failover_cooldown_until:
         return active
     _wan_strikes = 0
@@ -805,21 +830,18 @@ def ensure_tunnel(
 
     api_url = ""
     api_comfy_ok = False
-    if local_port == 8188 and http_ok(f"{WAN_API}/api/health", timeout=20):
-        try:
-            with urllib.request.urlopen(f"{WAN_API}/api/health", timeout=20) as r:
-                health = json.load(r)
-            api_comfy_ok = bool(health.get("comfyui"))
-            api_url = str(health.get("comfyui_url") or "").rstrip("/")
-        except Exception:
-            pass
+    if local_port == 8188:
+        # Ask the Render API, never the Wan API itself: a request every pass kept the
+        # free instance from ever sleeping (~744 instance-hours/month).
+        api_url = _render_comfy_url(tokens)
+        api_comfy_ok = bool(api_url) and http_ok(f"{api_url}/system_stats", timeout=15)
 
-    # Only trust the API URL when Comfy is actually reachable through it
-    if local_port == 8188 and api_comfy_ok and api_url and http_ok(f"{api_url}/system_stats", timeout=15):
+    # Only trust the Render URL when Comfy is actually reachable through it
+    if local_port == 8188 and api_comfy_ok:
         known = api_url
         state_path.parent.mkdir(parents=True, exist_ok=True)
         state_path.write_text(known + "\n", encoding="utf-8")
-        log(f"comfy tunnel healthy via API ({known})")
+        log(f"comfy tunnel healthy via Render env ({known})")
         _dedupe_cloudflared(local_port)
         return
 
@@ -882,6 +904,7 @@ def ensure_tunnel(
         if render_env_key == "GPU_AGENT_URL":
             updates["GPU_AGENT_SECRET"] = tokens["gpu_agent_secret"]
         set_env_and_deploy(render_tok, updates)
+        _invalidate_comfy_env_cache()
         if render_env_key == "GPU_AGENT_URL":
             upsert_token("gpu_agent", known)
             tokens["gpu_agent"] = known

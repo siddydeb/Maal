@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useVisibleInterval } from "./useVisibleInterval";
 import {
   cancelJob,
   clearJobQueue,
@@ -407,19 +408,10 @@ export default function App() {
     }
   }, []);
 
-  useEffect(() => {
-    if (view !== "ongoing") return undefined;
-    refreshOngoing();
-    const timer = setInterval(refreshOngoing, 4000);
-    return () => clearInterval(timer);
-  }, [view, refreshOngoing]);
+  useVisibleInterval(refreshOngoing, 4000, view === "ongoing");
 
-  // Keep the Ongoing badge fresh even when on other tabs
-  useEffect(() => {
-    refreshOngoing();
-    const timer = setInterval(refreshOngoing, 12000);
-    return () => clearInterval(timer);
-  }, [refreshOngoing]);
+  // Keep the Ongoing badge fresh even when on other tabs (paused while the page is hidden)
+  useVisibleInterval(refreshOngoing, 12000);
 
   const refreshHealth = useCallback(async () => {
     try {
