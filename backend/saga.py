@@ -9,6 +9,8 @@ Fully separate from the Wan / Klein pipelines:
 
 from __future__ import annotations
 
+import uuid
+
 import copy
 import io
 import json
@@ -1324,6 +1326,68 @@ async def run_still(
     return outputs[0]
 
 
+INTERP_MAX_FRAMES = 64
+
+
+def check_interpolate(files: dict[str, bytes], manifest: dict[str, Any]) -> dict[str, Any]:
+    """Manifest {"interpolate": 2..8, "frames": ["a.png", ...]} -> RIFE in-betweens (see run_interpolate)."""
+    try:
+        mult = int(manifest.get("interpolate"))
+    except (TypeError, ValueError):
+        raise SagaError("interpolate must be a whole number") from None
+    if not 2 <= mult <= 8:
+        raise SagaError("interpolate must be 2 to 8")
+    frames = [safe_name(f) for f in _as_list(manifest.get("frames"))]
+    if not 2 <= len(frames) <= INTERP_MAX_FRAMES:
+        raise SagaError(f"Send 2 to {INTERP_MAX_FRAMES} frames")
+    for f in frames:
+        if f not in files:
+            raise SagaError(f"'{f}' was not uploaded")
+    return {"interpolate": mult, "frames": frames, "items": [{"image": f, "pair": []} for f in frames]}
+
+
+async def run_interpolate(client: Any, bundle: bytes) -> tuple[bytes, str, dict]:
+    """RIFE (INTERP_MODEL) in-betweens for an ordered frame list -> zip of f0001.png... plus report.json.
+    Frames must share one size; output count is (n - 1) * multiplier + 1."""
+    files, manifest = unpack_inputs(bundle)
+    mult, frames = int(manifest["interpolate"]), manifest["frames"]
+    names = [await client._upload_image(files[f]) for f in frames]
+    g: dict[str, Any] = {}
+    prev = None
+    for i, name in enumerate(names):
+        g[f"l{i}"] = {"class_type": "LoadImage", "inputs": {"image": name}}
+        if prev is None:
+            prev = [f"l{i}", 0]
+        else:
+            g[f"b{i}"] = {"class_type": "ImageBatch", "inputs": {"image1": prev, "image2": [f"l{i}", 0]}}
+            prev = [f"b{i}", 0]
+    g["m"] = {"class_type": "FrameInterpolationModelLoader", "inputs": {"model_name": INTERP_MODEL}}
+    g["r"] = {"class_type": "FrameInterpolate", "inputs": {"interp_model": ["m", 0], "images": prev,
+                                                           "multiplier": mult}}
+    g["s"] = {"class_type": "SaveImage", "inputs": {"images": ["r", 0], "filename_prefix": "saga_interp"}}
+    await client.ensure_root()
+    cid = uuid.uuid4().hex
+    pid = await client._queue(g, cid)
+    descriptors: list = []
+    buf = io.BytesIO()
+    try:
+        await client._wait_ws(cid, pid, timeout=1800)
+        descriptors = client._collect_descriptors((await client._history(pid)).get("outputs") or {})
+        imgs = [d for d in descriptors if d.get("type") == "output"] or descriptors
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as zf:
+            for k, d in enumerate(sorted(imgs, key=lambda d: d["filename"])):
+                zf.writestr(f"f{k + 1:04d}.png", await client._view(d["filename"], d.get("subfolder", ""),
+                                                                     d.get("type", "output")))
+            zf.writestr("report.json", json.dumps({"frames_in": len(frames), "frames_out": len(imgs),
+                                                   "multiplier": mult, "model": INTERP_MODEL}))
+    finally:
+        for i, name in enumerate(names):
+            await client._full_scrub(prompt_id=pid, input_name=name, descriptors=descriptors if i == 0 else [])
+    return buf.getvalue(), "application/zip", {"model_label": INTERP_MODEL, "seed_used": 0,
+                                               "saga": {"kind": "interpolate", "multiplier": mult,
+                                                        "frames": len(frames)}}
+
+
 async def run_batch(
     client: Any, prompt: str, *, seed: Optional[int], options: Optional[dict[str, Any]], bundle: bytes,
     progress: Optional[Callable[[int, int], None]] = None,
@@ -1331,6 +1395,8 @@ async def run_batch(
     """Many part layers in one job with the same prompt, seed and settings (so a character stays the same
     person) -> zip of the results under their upload names plus report.json. After 3 failures in a row
     (GPU or tunnel down) it stops and returns what finished."""
+    if (options or {}).get("interpolate"):
+        return await run_interpolate(client, bundle)
     files, manifest = unpack_inputs(bundle)
     items = check_batch(files, manifest)["items"]
     sent = sorted({k for item in items for k in CONTROL_UPLOADS if k in item})
