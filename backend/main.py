@@ -940,7 +940,9 @@ async def saga_batch(
             if name in uploads:
                 raise HTTPException(400, f"'{name}' was uploaded twice")
             uploads[name] = raw
-        if isinstance(manifest_data, dict) and manifest_data.get("interpolate"):
+        if isinstance(manifest_data, dict) and manifest_data.get("workflow"):
+            clean = saga_mod.check_workflow(uploads, manifest_data)
+        elif isinstance(manifest_data, dict) and manifest_data.get("interpolate"):
             clean = saga_mod.check_interpolate(uploads, manifest_data)
         else:
             clean = saga_mod.check_batch(uploads, manifest_data)
@@ -961,6 +963,8 @@ async def saga_batch(
     options.update(batch=True, items=len(clean["items"]))
     if clean.get("interpolate"):
         options["interpolate"] = clean["interpolate"]
+    if clean.get("workflow"):
+        options["workflow"] = True
     seed = seed if seed is not None else saga_mod.new_seed()
 
     idem = db.normalize_client_key(client_key)

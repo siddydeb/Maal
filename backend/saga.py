@@ -1388,6 +1388,80 @@ async def run_interpolate(client: Any, bundle: bytes) -> tuple[bytes, str, dict]
                                                         "frames": len(frames)}}
 
 
+WORKFLOW_MAX_NODES = 120
+WORKFLOW_MAX_FRAMES = 161
+WORKFLOW_NODES = {
+    "LoadImage", "LoadImageMask", "ImageBatch", "ImageScale", "ImageScaleBy", "ImageCrop", "ImageInvert",
+    "ImageCompositeMasked", "ImageFromBatch", "RepeatImageBatch", "SaveImage", "PreviewImage", "SaveAnimatedWEBP",
+    "VAELoader", "VAEDecode", "VAEEncode", "VAEDecodeTiled", "VAEEncodeForInpaint", "SetLatentNoiseMask",
+    "CLIPLoader", "DualCLIPLoader", "CLIPTextEncode", "CLIPVisionLoader", "CLIPVisionEncode", "UNETLoader",
+    "CheckpointLoaderSimple", "LoraLoader", "LoraLoaderModelOnly", "KSampler", "KSamplerAdvanced",
+    "ModelSamplingSD3", "ModelSamplingFlux", "FluxGuidance", "EmptyLatentImage", "EmptySD3LatentImage",
+    "WanImageToVideo", "WanFirstLastFrameToVideo", "Wan22ImageToVideoLatent", "CreateVideo", "SaveVideo",
+    "SaveWEBM", "GetVideoComponents", "FrameInterpolationModelLoader", "FrameInterpolate",
+    "UpscaleModelLoader", "ImageUpscaleWithModel", "PulidFluxModelLoader", "PulidFluxInsightFaceLoader",
+    "PulidFluxEvaClipLoader", "ApplyPulidFlux", "ReActorRestoreFace", "UltralyticsDetectorProvider",
+    "BboxDetectorSEGS", "SegsToCombinedMask", "MaskToImage", "ImageToMask", "GrowMask", "FeatherMask",
+    "SamplerCustomAdvanced", "KSamplerSelect", "BasicScheduler", "BasicGuider", "CFGGuider", "RandomNoise",
+    "Power Lora Loader (rgthree)",
+}
+
+
+def check_workflow(files: dict[str, bytes], manifest: dict[str, Any]) -> dict[str, Any]:
+    """Manifest {"workflow": {ComfyUI API graph}} where LoadImage/LoadImageMask "image" names uploaded files.
+    Only WORKFLOW_NODES class types; frame counts capped at WORKFLOW_MAX_FRAMES."""
+    g = manifest.get("workflow")
+    if not isinstance(g, dict) or not 1 <= len(g) <= WORKFLOW_MAX_NODES:
+        raise SagaError(f"workflow must be a graph of 1 to {WORKFLOW_MAX_NODES} nodes")
+    used: list[str] = []
+    for nid, node in g.items():
+        if not isinstance(node, dict) or node.get("class_type") not in WORKFLOW_NODES:
+            raise SagaError(f"node {nid}: class_type not allowed")
+        inp = node.get("inputs") or {}
+        for k in ("length", "batch_size", "amount"):
+            if isinstance(inp.get(k), int) and inp[k] > WORKFLOW_MAX_FRAMES:
+                raise SagaError(f"node {nid}: {k} over {WORKFLOW_MAX_FRAMES}")
+        if node["class_type"] in ("LoadImage", "LoadImageMask"):
+            f = safe_name(str(inp.get("image") or ""))
+            if f not in files:
+                raise SagaError(f"node {nid}: '{f}' was not uploaded")
+            used.append(f)
+    return {"workflow": g, "items": [{"image": f, "pair": []} for f in dict.fromkeys(used)]}
+
+
+async def run_workflow(client: Any, bundle: bytes) -> tuple[bytes, str, dict]:
+    """Run an allowlisted ComfyUI graph -> zip of every output file plus report.json; inputs scrubbed."""
+    files, manifest = unpack_inputs(bundle)
+    g = json.loads(json.dumps(manifest["workflow"]))
+    remote: dict[str, str] = {}
+    for node in g.values():
+        if node["class_type"] in ("LoadImage", "LoadImageMask"):
+            f = safe_name(str(node["inputs"]["image"]))
+            if f not in remote:
+                remote[f] = await client._upload_image(files[f])
+            node["inputs"]["image"] = remote[f]
+    await client.ensure_root()
+    cid = uuid.uuid4().hex
+    pid = await client._queue(g, cid)
+    descriptors: list = []
+    buf = io.BytesIO()
+    try:
+        await client._wait_ws(cid, pid, timeout=3600)
+        descriptors = client._collect_descriptors((await client._history(pid)).get("outputs") or {})
+        outs = [d for d in descriptors if d.get("type") == "output"] or descriptors
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as zf:
+            for k, d in enumerate(sorted(outs, key=lambda d: d["filename"])):
+                zf.writestr(f"o{k + 1:04d}_{d['filename']}", await client._view(
+                    d["filename"], d.get("subfolder", ""), d.get("type", "output")))
+            zf.writestr("report.json", json.dumps({"outputs": len(outs), "nodes": len(g)}))
+    finally:
+        names = list(remote.values()) or [None]
+        for i, name in enumerate(names):
+            await client._full_scrub(prompt_id=pid, input_name=name, descriptors=descriptors if i == 0 else [])
+    return buf.getvalue(), "application/zip", {"model_label": "workflow", "seed_used": 0,
+                                               "saga": {"kind": "workflow", "nodes": len(g)}}
+
+
 async def run_batch(
     client: Any, prompt: str, *, seed: Optional[int], options: Optional[dict[str, Any]], bundle: bytes,
     progress: Optional[Callable[[int, int], None]] = None,
@@ -1397,6 +1471,8 @@ async def run_batch(
     (GPU or tunnel down) it stops and returns what finished."""
     if (options or {}).get("interpolate"):
         return await run_interpolate(client, bundle)
+    if (options or {}).get("workflow"):
+        return await run_workflow(client, bundle)
     files, manifest = unpack_inputs(bundle)
     items = check_batch(files, manifest)["items"]
     sent = sorted({k for item in items for k in CONTROL_UPLOADS if k in item})
