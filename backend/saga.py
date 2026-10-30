@@ -1390,32 +1390,21 @@ async def run_interpolate(client: Any, bundle: bytes) -> tuple[bytes, str, dict]
 
 WORKFLOW_MAX_NODES = 120
 WORKFLOW_MAX_FRAMES = 161
-WORKFLOW_NODES = {
-    "LoadImage", "LoadImageMask", "ImageBatch", "ImageScale", "ImageScaleBy", "ImageCrop", "ImageInvert",
-    "ImageCompositeMasked", "ImageFromBatch", "RepeatImageBatch", "SaveImage", "PreviewImage", "SaveAnimatedWEBP",
-    "VAELoader", "VAEDecode", "VAEEncode", "VAEDecodeTiled", "VAEEncodeForInpaint", "SetLatentNoiseMask",
-    "CLIPLoader", "DualCLIPLoader", "CLIPTextEncode", "CLIPVisionLoader", "CLIPVisionEncode", "UNETLoader",
-    "CheckpointLoaderSimple", "LoraLoader", "LoraLoaderModelOnly", "KSampler", "KSamplerAdvanced",
-    "ModelSamplingSD3", "ModelSamplingFlux", "FluxGuidance", "EmptyLatentImage", "EmptySD3LatentImage",
-    "WanImageToVideo", "WanFirstLastFrameToVideo", "Wan22ImageToVideoLatent", "CreateVideo", "SaveVideo",
-    "SaveWEBM", "GetVideoComponents", "FrameInterpolationModelLoader", "FrameInterpolate",
-    "UpscaleModelLoader", "ImageUpscaleWithModel", "PulidFluxModelLoader", "PulidFluxInsightFaceLoader",
-    "PulidFluxEvaClipLoader", "ApplyPulidFlux", "ReActorRestoreFace", "UltralyticsDetectorProvider",
-    "BboxDetectorSEGS", "SegsToCombinedMask", "MaskToImage", "ImageToMask", "GrowMask", "FeatherMask",
-    "SamplerCustomAdvanced", "KSamplerSelect", "BasicScheduler", "BasicGuider", "CFGGuider", "RandomNoise",
-    "Power Lora Loader (rgthree)",
-}
+# Every installed node may run except ones that read or write arbitrary files on the GPU machine
+# (path/folder loaders, folder/text/json savers, 3D file I/O, file uploads to paid API nodes).
+WORKFLOW_BLOCKED = re.compile(r"(?i)(path$|folder$|filename|files?$|file3d|python|shell|^savetext$)")
 
 
 def check_workflow(files: dict[str, bytes], manifest: dict[str, Any]) -> dict[str, Any]:
     """Manifest {"workflow": {ComfyUI API graph}} where LoadImage/LoadImageMask "image" names uploaded files.
-    Only WORKFLOW_NODES class types; frame counts capped at WORKFLOW_MAX_FRAMES."""
+    Any class type except WORKFLOW_BLOCKED; frame counts capped at WORKFLOW_MAX_FRAMES."""
     g = manifest.get("workflow")
     if not isinstance(g, dict) or not 1 <= len(g) <= WORKFLOW_MAX_NODES:
         raise SagaError(f"workflow must be a graph of 1 to {WORKFLOW_MAX_NODES} nodes")
     used: list[str] = []
     for nid, node in g.items():
-        if not isinstance(node, dict) or node.get("class_type") not in WORKFLOW_NODES:
+        ctype = node.get("class_type") if isinstance(node, dict) else None
+        if not isinstance(ctype, str) or not ctype or WORKFLOW_BLOCKED.search(ctype):
             raise SagaError(f"node {nid}: class_type not allowed")
         inp = node.get("inputs") or {}
         for k in ("length", "batch_size", "amount"):

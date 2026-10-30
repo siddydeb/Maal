@@ -812,5 +812,32 @@ class ControlTests(unittest.TestCase):
                              {"items": [{"image": "a.png", "control_image": "c.png"}]})
 
 
+class WorkflowTests(unittest.TestCase):
+    KONTEXT = {
+        "1": {"class_type": "UNETLoader", "inputs": {"unet_name": "flux1-dev-kontext_fp8_scaled.safetensors"}},
+        "2": {"class_type": "LoadImage", "inputs": {"image": "a.png"}},
+        "3": {"class_type": "FluxKontextImageScale", "inputs": {"image": ["2", 0]}},
+        "4": {"class_type": "ReferenceLatent", "inputs": {}},
+        "5": {"class_type": "ConditioningZeroOut", "inputs": {}},
+        "6": {"class_type": "FluxKontextMultiReferenceLatentMethod", "inputs": {}},
+        "7": {"class_type": "SaveImage", "inputs": {}},
+    }
+
+    def test_any_installed_node_allowed(self):
+        out = saga.check_workflow({"a.png": b"x"}, {"workflow": self.KONTEXT})
+        self.assertEqual(out["items"], [{"image": "a.png", "pair": []}])
+
+    def test_file_and_path_nodes_blocked(self):
+        for ctype in ("VHS_LoadImagePath", "LoadImageDataSetFromFolder", "SaveText", "SavePoseKpsAsJsonFile",
+                      "VHS_SelectFilename", "OpenAIInputFiles", ""):
+            g = {**self.KONTEXT, "9": {"class_type": ctype, "inputs": {}}}
+            with self.assertRaises(saga.SagaError, msg=ctype):
+                saga.check_workflow({"a.png": b"x"}, {"workflow": g})
+
+    def test_load_image_must_be_uploaded(self):
+        with self.assertRaises(saga.SagaError):
+            saga.check_workflow({}, {"workflow": self.KONTEXT})
+
+
 if __name__ == "__main__":
     unittest.main()
